@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>MeetingRecorder.Core</RootNamespace>
+    <!--
+      Deliberately platform neutral (net8.0, not net8.0-windows).
+      Everything Windows specific lives in MeetingRecorder.Audio behind the
+      interfaces declared here, so the DSP / pipeline / persistence logic can be
+      unit tested on any CI runner (and by developers on Linux/macOS).
+    -->
+  </PropertyGroup>
+
+</Project>

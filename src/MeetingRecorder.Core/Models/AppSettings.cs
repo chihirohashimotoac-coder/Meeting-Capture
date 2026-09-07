@@ -1,0 +1,88 @@
+using System.Text.Json.Serialization;
+
+namespace MeetingRecorder.Core.Models;
+
+/// <summary>
+/// Everything the app remembers between runs. Stored as JSON next to the
+/// executable (portable mode) or under %LOCALAPPDATA% when the install folder
+/// is read-only. Contains no credentials - the app has no account of any kind.
+/// </summary>
+public sealed class AppSettings
+{
+    public const int CurrentVersion = 1;
+
+    public int Version { get; set; } = CurrentVersion;
+
+    /// <summary>Set once the first-run wizard has been completed.</summary>
+    public bool SetupCompleted { get; set; }
+
+    // ---- Devices ---------------------------------------------------------
+
+    /// <summary>MMDevice id of the capture endpoint, or null for "system default".</summary>
+    public string? MicrophoneDeviceId { get; set; }
+
+    public string? MicrophoneDeviceName { get; set; }
+
+    /// <summary>MMDevice id of the render endpoint that is loopback-captured, or null for "system default".</summary>
+    public string? RenderDeviceId { get; set; }
+
+    public string? RenderDeviceName { get; set; }
+
+    /// <summary>Follow the Windows default device when the user switches it mid-meeting.</summary>
+    public bool FollowDefaultDevices { get; set; } = true;
+
+    // ---- Output ----------------------------------------------------------
+
+    /// <summary>Root folder that receives one sub-folder per meeting.</summary>
+    public string? SaveRoot { get; set; }
+
+    public RecordingFormat Format { get; set; } = RecordingFormat.Wav;
+
+    /// <summary>
+    /// MP3 bitrate in kbps. 96 kbps mono/joint-stereo at 16 kHz-48 kHz is the
+    /// documented default: speech stays clearly intelligible while an hour of
+    /// meeting costs ~43 MB. See docs/ARCHITECTURE.md "Recording format".
+    /// </summary>
+    public int Mp3BitrateKbps { get; set; } = 96;
+
+    // ---- Audio processing ------------------------------------------------
+
+    public AudioProcessingSettings Processing { get; set; } = new();
+
+    // ---- Speech to text --------------------------------------------------
+
+    /// <summary>Catalog id of the Whisper model to use, or null to auto-select.</summary>
+    public string? SttModelId { get; set; }
+
+    /// <summary>BCP-47-ish language code handed to whisper.cpp.</summary>
+    public string SttLanguage { get; set; } = "ja";
+
+    public bool SttEnabled { get; set; } = true;
+
+    /// <summary>Folder that stores downloaded AI models. Never inside the repo.</summary>
+    public string? ModelDirectory { get; set; }
+
+    /// <summary>Result of the last hardware benchmark; re-used until hardware changes.</summary>
+    public PerformanceProfile? Profile { get; set; }
+
+    // ---- Optional / experimental ----------------------------------------
+
+    public bool DiarizationEnabled { get; set; } = true;
+
+    public bool MinutesEnabled { get; set; } = true;
+
+    /// <summary>Catalog id of the local GGUF model used for minutes, or null.</summary>
+    public string? LlmModelId { get; set; }
+
+    // ---- Behaviour -------------------------------------------------------
+
+    public bool PreventSleepWhileRecording { get; set; } = true;
+
+    /// <summary>How often the recovery journal is flushed to disk.</summary>
+    public int AutoSaveIntervalSeconds { get; set; } = 15;
+
+    [JsonIgnore]
+    public bool HasUsableSaveRoot => !string.IsNullOrWhiteSpace(SaveRoot);
+
+    public AppSettings Clone() => (AppSettings)MemberwiseClone();
+}

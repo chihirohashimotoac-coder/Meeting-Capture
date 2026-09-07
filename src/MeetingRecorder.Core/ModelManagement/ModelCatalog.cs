@@ -1,0 +1,154 @@
+namespace MeetingRecorder.Core.ModelManagement;
+
+/// <summary>
+/// The fixed list of models the application will ever download.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The list is a hard-coded allow-list on purpose: there is no "enter a URL"
+/// field anywhere in the product, so a malicious settings file cannot turn the
+/// recorder into a downloader for arbitrary content.
+/// </para>
+/// <para><b>Why these models</b></para>
+/// <list type="bullet">
+/// <item><description>
+/// <b>Whisper (ggml, MIT).</b> whisper.cpp runs well on a 15 W mobile CPU, the
+/// quantized builds cut both file size and RAM roughly in half for a small
+/// accuracy cost, and Japanese is one of the languages the model handles best.
+/// Quantized variants (q5_1 / q5_0) are preferred over the f16 originals
+/// because on an i5-1335U memory bandwidth, not arithmetic, is the limit.
+/// </description></item>
+/// <item><description>
+/// <b>Qwen2.5 Instruct (Apache-2.0).</b> Picked for the experimental minutes
+/// generator because it is genuinely Apache-2.0 - usable inside a company
+/// without a bespoke licence review - has solid Japanese for its size, and ships
+/// official GGUF builds. The 1.5B build is the default; 3B and larger models
+/// under research-only licences were rejected despite better output.
+/// </description></item>
+/// </list>
+/// </remarks>
+public static class ModelCatalog
+{
+    public const string WhisperTiny = "whisper-tiny-q5_1";
+    public const string WhisperBase = "whisper-base-q5_1";
+    public const string WhisperSmall = "whisper-small-q5_1";
+    public const string WhisperMedium = "whisper-medium-q5_0";
+
+    public const string LlmQwen25_1_5B = "qwen2.5-1.5b-instruct-q4_k_m";
+    public const string LlmQwen25_3B = "qwen2.5-3b-instruct-q4_k_m";
+
+    private const string WhisperBaseUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/";
+
+    public static IReadOnlyList<ModelDescriptor> SpeechModels { get; } = new[]
+    {
+        new ModelDescriptor
+        {
+            Id = WhisperTiny,
+            DisplayName = "Whisper tiny (量子化 q5_1)",
+            Purpose = ModelPurpose.SpeechToText,
+            PurposeDescription = "日本語のリアルタイム文字起こし（最軽量・精度は低め）",
+            Url = WhisperBaseUrl + "ggml-tiny-q5_1.bin",
+            FileName = "ggml-tiny-q5_1.bin",
+            ApproximateSizeBytes = 32_200_000,
+            Publisher = "ggerganov / whisper.cpp (Hugging Face)",
+            License = "MIT",
+            LicenseUrl = "https://github.com/ggerganov/whisper.cpp/blob/master/LICENSE",
+            RequiredRamMb = 300,
+            RelativeCost = 0.25,
+            Notes = "非力なPCや、他の処理と併用する場合のフォールバック。",
+        },
+        new ModelDescriptor
+        {
+            Id = WhisperBase,
+            DisplayName = "Whisper base (量子化 q5_1)",
+            Purpose = ModelPurpose.SpeechToText,
+            PurposeDescription = "日本語のリアルタイム文字起こし（軽量）",
+            Url = WhisperBaseUrl + "ggml-base-q5_1.bin",
+            FileName = "ggml-base-q5_1.bin",
+            ApproximateSizeBytes = 59_700_000,
+            Publisher = "ggerganov / whisper.cpp (Hugging Face)",
+            License = "MIT",
+            LicenseUrl = "https://github.com/ggerganov/whisper.cpp/blob/master/LICENSE",
+            RequiredRamMb = 500,
+            RelativeCost = 0.5,
+            Notes = "低速なPCでもリアルタイムを維持しやすい既定候補。",
+        },
+        new ModelDescriptor
+        {
+            Id = WhisperSmall,
+            DisplayName = "Whisper small (量子化 q5_1)",
+            Purpose = ModelPurpose.SpeechToText,
+            PurposeDescription = "日本語のリアルタイム文字起こし（標準・推奨）",
+            Url = WhisperBaseUrl + "ggml-small-q5_1.bin",
+            FileName = "ggml-small-q5_1.bin",
+            ApproximateSizeBytes = 190_000_000,
+            Publisher = "ggerganov / whisper.cpp (Hugging Face)",
+            License = "MIT",
+            LicenseUrl = "https://github.com/ggerganov/whisper.cpp/blob/master/LICENSE",
+            RequiredRamMb = 1024,
+            RelativeCost = 1.0,
+            Notes = "Core i5-1335U クラスで実用的な精度と速度のバランス点。",
+        },
+        new ModelDescriptor
+        {
+            Id = WhisperMedium,
+            DisplayName = "Whisper medium (量子化 q5_0)",
+            Purpose = ModelPurpose.SpeechToText,
+            PurposeDescription = "日本語の文字起こし（高精度・高負荷）",
+            Url = WhisperBaseUrl + "ggml-medium-q5_0.bin",
+            FileName = "ggml-medium-q5_0.bin",
+            ApproximateSizeBytes = 539_000_000,
+            Publisher = "ggerganov / whisper.cpp (Hugging Face)",
+            License = "MIT",
+            LicenseUrl = "https://github.com/ggerganov/whisper.cpp/blob/master/LICENSE",
+            RequiredRamMb = 2200,
+            RelativeCost = 3.0,
+            Notes = "高性能PC向け。基準PCでは遅延が蓄積するため自動選択されません。",
+        },
+    };
+
+    public static IReadOnlyList<ModelDescriptor> TextGenerationModels { get; } = new[]
+    {
+        new ModelDescriptor
+        {
+            Id = LlmQwen25_1_5B,
+            DisplayName = "Qwen2.5 1.5B Instruct (GGUF Q4_K_M)",
+            Purpose = ModelPurpose.TextGeneration,
+            PurposeDescription = "録音停止後の議事録生成（実験的機能・完全ローカル）",
+            Url = "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            FileName = "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+            ApproximateSizeBytes = 1_120_000_000,
+            Publisher = "Qwen (Alibaba Cloud) via Hugging Face",
+            License = "Apache-2.0",
+            LicenseUrl = "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/blob/main/LICENSE",
+            RequiredRamMb = 2048,
+            RelativeCost = 1.0,
+            Notes = "Apache-2.0 のため社内商用利用の可否が明確。基準PCの既定。",
+        },
+        new ModelDescriptor
+        {
+            Id = LlmQwen25_3B,
+            DisplayName = "Qwen2.5 3B Instruct (GGUF Q4_K_M)",
+            Purpose = ModelPurpose.TextGeneration,
+            PurposeDescription = "録音停止後の議事録生成（高品質・高負荷）",
+            Url = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+            FileName = "qwen2.5-3b-instruct-q4_k_m.gguf",
+            ApproximateSizeBytes = 2_100_000_000,
+            Publisher = "Qwen (Alibaba Cloud) via Hugging Face",
+            License = "Qwen Research License",
+            LicenseUrl = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct/blob/main/LICENSE",
+            RequiredRamMb = 4096,
+            RelativeCost = 2.0,
+            Notes = "ライセンスが Apache-2.0 ではないため、自動選択されません。社内利用可否を確認のうえ手動で選択してください。",
+        },
+    };
+
+    public static IEnumerable<ModelDescriptor> All => SpeechModels.Concat(TextGenerationModels);
+
+    public static ModelDescriptor? Find(string? id)
+        => id is null ? null : All.FirstOrDefault(m => string.Equals(m.Id, id, StringComparison.OrdinalIgnoreCase));
+
+    public static ModelDescriptor RequireSpeechModel(string id)
+        => SpeechModels.FirstOrDefault(m => string.Equals(m.Id, id, StringComparison.OrdinalIgnoreCase))
+           ?? throw new KeyNotFoundException($"Unknown speech model id '{id}'.");
+}
