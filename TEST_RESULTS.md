@@ -2,6 +2,8 @@
 
 最終更新: 2026-09-07 / 対象ブランチ: `claude/windows-meeting-recorder-app-slkq27`
 
+自動テスト合計 **151 件**（Core 122 / Stt 11 / App 10 / Audio 8）。すべて GitHub Actions の `windows-latest` 上で成功しています。
+
 ---
 
 ## 0. 読み方（重要）
@@ -36,9 +38,9 @@
 | --- | --- | --- | --- |
 | ソリューション全体の restore | GitHub Actions / windows-latest | PASS | 10 プロジェクト |
 | Release ビルド（全プロジェクト） | GitHub Actions / windows-latest | PASS | WPF アプリを含む |
-| `MeetingRecorder.Core.Tests`（121 件） | GitHub Actions / windows-latest | PASS | DSP・永続化・パイプライン・話者分離・議事録 |
+| `MeetingRecorder.Core.Tests`（122 件） | GitHub Actions / windows-latest | PASS | DSP・永続化・パイプライン・話者分離・議事録 |
 | `MeetingRecorder.Stt.Tests`（11 件） | GitHub Actions / windows-latest | PASS | モデルダウンロード整合性・認識器契約 |
-| `MeetingRecorder.Audio.Tests` | GitHub Actions / windows-latest | PASS | 実デバイス非依存の範囲のみ（下記 C も参照） |
+| `MeetingRecorder.Audio.Tests`（8 件） | GitHub Actions / windows-latest | PASS | 実デバイス非依存の範囲のみ（下記 C も参照） |
 | `MeetingRecorder.App.Tests`（10 件） | GitHub Actions / windows-latest | PASS | 全ウィンドウの XAML ロード＋データバインド検証 |
 | 自己完結型 publish（win-x64） | GitHub Actions / windows-latest | PASS | `--self-contained true` |
 | publish 出力の検証 | GitHub Actions / windows-latest | PASS | `MeetingRecorder.exe` / `hostfxr.dll` / `coreclr.dll` / `PresentationFramework.dll` / whisper ネイティブの存在確認 |
