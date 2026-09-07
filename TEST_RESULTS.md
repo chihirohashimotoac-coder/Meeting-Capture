@@ -2,7 +2,15 @@
 
 最終更新: 2026-09-07 / 対象ブランチ: `claude/windows-meeting-recorder-app-slkq27`
 
-自動テスト合計 **151 件**（Core 122 / Stt 11 / App 10 / Audio 8）。すべて GitHub Actions の `windows-latest` 上で成功しています。
+自動テスト合計 **163 件**（Core 132 / Stt 13 / App 10 / Audio 8）。すべて GitHub Actions の
+`windows-latest` 上で成功しています（実行記録:
+[run #22](https://github.com/chihirohashimotoac-coder/Meeting-Capture/actions/runs/34143240997)、
+commit `0fa21c7`）。
+
+このうち 2 件（`RealModelRecognitionTests`）は**実際の whisper.cpp と実モデル**を使う
+テストで、モデルと音声ファイルが揃った専用ステップで再実行されます。CI では
+`MEETINGRECORDER_REQUIRE_REAL_STT=1` を設定しているため、**フィクスチャが無ければ
+スキップではなく失敗**します（テストが黙って実行されなくなる事故を防ぐため）。
 
 ---
 
@@ -38,8 +46,8 @@
 | --- | --- | --- | --- |
 | ソリューション全体の restore | GitHub Actions / windows-latest | PASS | 10 プロジェクト |
 | Release ビルド（全プロジェクト） | GitHub Actions / windows-latest | PASS | WPF アプリを含む |
-| `MeetingRecorder.Core.Tests`（122 件） | GitHub Actions / windows-latest | PASS | DSP・永続化・パイプライン・話者分離・議事録 |
-| `MeetingRecorder.Stt.Tests`（11 件） | GitHub Actions / windows-latest | PASS | モデルダウンロード整合性・認識器契約 |
+| `MeetingRecorder.Core.Tests`（132 件） | GitHub Actions / windows-latest | PASS | DSP・永続化・パイプライン・話者分離・議事録 |
+| `MeetingRecorder.Stt.Tests`（13 件） | GitHub Actions / windows-latest | PASS | モデルダウンロード整合性・認識器契約 |
 | `MeetingRecorder.Audio.Tests`（8 件） | GitHub Actions / windows-latest | PASS | 実デバイス非依存の範囲のみ（下記 C も参照） |
 | `MeetingRecorder.App.Tests`（10 件） | GitHub Actions / windows-latest | PASS | 全ウィンドウの XAML ロード＋データバインド検証 |
 | 自己完結型 publish（win-x64） | GitHub Actions / windows-latest | PASS | `--self-contained true` |
@@ -47,9 +55,15 @@
 | AIモデルが配布物に混入しないこと | GitHub Actions / windows-latest | PASS | `*.gguf` / `ggml-*.bin` があればビルド失敗 |
 | ZIP 生成 | GitHub Actions / windows-latest | PASS | `MeetingRecorder-win-x64.zip` |
 | ZIP の内容検証 | GitHub Actions / windows-latest | PASS | 展開せずに `MeetingRecorder.exe` の存在を確認 |
-| Artifact アップロード | GitHub Actions / windows-latest | PASS | Artifact 名 `MeetingRecorder-win-x64`（約 73 MB） |
+| Artifact アップロード | GitHub Actions / windows-latest | PASS | Artifact 名 `MeetingRecorder-win-x64` / 76,843,081 バイト。ZIP 73.5 MB・345 エントリ（展開後 169.4 MB） |
 | llama.cpp の命令セット別レイアウト保持 | GitHub Actions / windows-latest | PASS | noavx/avx/avx2/avx512 の4種が存在し、ルートに平坦化された `llama.dll` が無いことを検証 |
 | AIモデルの SHA-256 実測 | GitHub Actions / ubuntu-latest | PASS | 全 6 モデルをダウンロードしてハッシュを取得し、カタログにピン留め |
+| ワークフローの静的検査 | GitHub Actions / windows-latest | PASS | `tools/check_workflows.py`。`shell: powershell` ステップに非ASCII文字が入るとビルド失敗（PowerShell 5.1 のANSI誤読対策） |
+| PowerShell 補助スクリプトの構文検査 | GitHub Actions / windows-latest | PASS | `tools/Verify-NoNetwork.ps1` をパーサーに通す |
+| **実モデルのダウンロードとハッシュ照合（毎ビルド）** | GitHub Actions / windows-latest | PASS | `ggml-tiny-q5_1.bin` を実取得し、ピン留めした SHA-256 と一致することを確認 |
+| SAPI による音声合成 | GitHub Actions / windows-latest | PASS | 213,486 バイトの英語音声を生成（16kHz/mono） |
+| **実 whisper.cpp による音声認識** | GitHub Actions / windows-latest | PASS | 下記 2.9 に認識結果を記載 |
+| **パッケージ済み実行ファイルの自己診断** | GitHub Actions / windows-latest | PASS | publish 出力の `MeetingRecorder.exe --diagnose` を起動し、11 チェックが実行されることを確認（詳細は 2.10） |
 
 ---
 
@@ -136,7 +150,8 @@
 | 遅延（バックログ）が UI へ報告される | GitHub Actions / windows-latest | PASS | |
 | 認識器の例外でスケジューラが停止しない | GitHub Actions / windows-latest | PASS | |
 | 一時退避ディレクトリが削除される | GitHub Actions / windows-latest | PASS | |
-| **実モデルでの日本語認識精度** | **Not tested** | — | **C 分類。T-23** |
+| **実モデルでの英語認識（合成音声）** | GitHub Actions / windows-latest | PASS | 実 whisper.cpp。詳細は 2.9 |
+| **実モデルでの日本語認識精度** | **Not tested** | — | **C 分類。T-23。ランナーに日本語音声（SAPI日本語ボイス）が無いため CI では検証できません** |
 
 ### 2.5 モデル管理
 
@@ -201,6 +216,67 @@
 | 文字起こし編集・話者名の表示ロジック | GitHub Actions / windows-latest | PASS | |
 | **実際の操作性・表示崩れ・IME** | **Not tested** | — | **C 分類。実機確認が必要** |
 
+### 2.9 実エンジンでの音声認識（テストダブルではありません）
+
+CI が Windows の SAPI で英語音声を合成し、**実際の `ggml-tiny-q5_1.bin` を実 whisper.cpp
+に読み込ませて**認識させています。ここだけはフェイクを一切通していません。
+
+| Test | Environment | Result | Notes |
+| --- | --- | --- | --- |
+| 実モデルのロードと認識 | GitHub Actions / windows-latest | PASS | 音声 6.67 秒 → 2 スパン、処理 1.48 秒（**RTF 0.22**） |
+| チャンカー＋スケジューラ経由の同一経路 | GitHub Actions / windows-latest | PASS | VAD が 1 チャンク（6.67 秒）を切り出し、失敗 0、実測 RTF 0.23 |
+| 期待語の一致 | GitHub Actions / windows-latest | PASS | `meeting, recorder, test, budget, review, monday` の **6/6** が一致 |
+
+実際に返ってきたテキスト（CI ログからの逐語引用）:
+
+```
+This is a meeting recorder test. The quarterly budget review is scheduled for Monday.
+```
+
+**これで確認できたこと:** whisper.cpp のネイティブバイナリが自己完結型 publish から
+ロードされること、チャンカーがモデルへ正しく音声を渡していること、経路全体が
+無音ではなくテキストを産出すること。
+
+**これで確認できていないこと:** 合成音声であり、実マイクで録った実会議ではありません。
+また日本語ではありません。**日本語の実音声での精度は T-23 のまま未実施です。**
+
+### 2.10 パッケージ済み実行ファイルの自己診断（`--diagnose`）
+
+ビルドしたソースではなく、**配布する ZIP の中身と同じ publish 出力の `MeetingRecorder.exe`**
+を CI が起動し、自己診断を実行させています。
+
+| Test | Environment | Result | Notes |
+| --- | --- | --- | --- |
+| `--diagnose` が実行ファイルとして起動する | GitHub Actions / windows-latest | PASS | WinExe から `AttachConsole` で出力 |
+| 11 個のチェックが実行される | GitHub Actions / windows-latest | PASS | D-01〜D-08 |
+| JSON レポートが出力される | GitHub Actions / windows-latest | PASS | `--json` で機械可読 |
+| 問題があれば終了コードが 0 以外 | GitHub Actions / windows-latest | PASS | ランナーではデバイス不在のため exit code 1 |
+| **デバイス不在を「正常」と偽らない** | GitHub Actions / windows-latest | PASS | D-01 / D-02 を明確に「エラー」と報告 |
+| 外向き TCP 接続の実測 | GitHub Actions / windows-latest | PASS | D-08 = **0 件** |
+
+ランナー上での実際の出力（抜粋）:
+
+```
+OS            : Microsoft Windows 10.0.26100
+CPU / RAM     : 4 論理コア / 16.0 GB
+データ保存先  : ...\publish\MeetingRecorder-win-x64\data（ポータブルモード）
+[ｴﾗｰ]   D-01  録音デバイス (マイク)          利用可能な録音デバイスが 0 件です。
+[ｴﾗｰ]   D-02  再生デバイス (ループバック元)  利用可能な再生デバイスが 0 件です。
+[ OK ]  D-03  空き容量  31.4 GB（WAVで約98時間分）
+[未実施] D-04/05  音声取得テスト  --seconds 0 が指定されたため実行していません。
+[ OK ]  D-06  実測スコア 0.81 / 推定RTF 0.34 / 選択モデル Whisper base (q5_1) / スレッド 2
+[ OK ]  D-08  このプロセスが確立している外向きTCP接続は 0 件です
+総合判定: エラーあり
+```
+
+**D-01 / D-02 のエラーは正しい結果です。** GitHub Actions のランナーには実マイクも
+実スピーカーも存在しません。ここで「OK」と出ていたら、それこそが偽の検証です。
+
+**D-08 が 0 件であることは、CI 環境での 1 プロセス・1 時点の実測です。**
+実機での常時監視は T-45（`tools/Verify-NoNetwork.ps1`）のままです。
+
+---
+
 ---
 
 ## 3. C. Windows 実機確認が必要（すべて未実施）
@@ -208,17 +284,35 @@
 以下は GitHub Actions 上では原理的に検証できません。
 **推測で PASS と記載してはいけません。**
 
+ただし、このうち 8 項目は実機で
+`MeetingRecorder.exe --diagnose --seconds 10` を **1 回実行するだけ**で
+確認できるようになりました（`--json` で機械可読なレポートも出ます）。
+
+| 診断ID | 対応する Test | 内容 |
+| --- | --- | --- |
+| D-01 | T-04 | マイク認識 |
+| D-02 | T-05 | 再生デバイス認識 |
+| D-03 | T-06, T-43 | 権限・保存先・空き容量 |
+| D-04 | T-07 | マイクからの受信サンプル数とレベル |
+| **D-05** | **T-09** | **WASAPIループバックからの受信サンプル数とレベル** |
+| D-06 | T-20 の一部 | CPU実測とモデル自動選択 |
+| D-07 | T-22 の一部 | モデルの有無と SHA-256 照合記録 |
+| D-08 | T-45 の簡易版 | このプロセスの外向きTCP接続 |
+
+**このマッピングは「実行方法が用意された」という意味であり、「実行済み」ではありません。**
+実行して初めて下表の `Result` を更新できます。
+
 | ID | Test | Environment | Result | 理由 |
 | --- | --- | --- | --- | --- |
 | T-01 | ZIP展開のみで起動できる | Not tested | — | ランナーで GUI アプリを起動していない |
 | T-02 | SmartScreen の挙動 | Not tested | — | ランナーには SmartScreen の実行環境がない |
 | T-03 | 一般ユーザー権限での動作 | Not tested | — | ランナーは管理者権限で動作 |
-| T-04 | マイク認識 | Not tested | — | **ランナーに実マイクが存在しない** |
-| T-05 | 再生デバイス認識 | Not tested | — | **ランナーに実スピーカーが存在しない** |
-| T-06 | マイクのプライバシー設定 | Not tested | — | 実機の Windows 設定が必要 |
-| T-07 | 録音前のマイクレベルメーター | Not tested | — | 実音声入力が必要 |
+| T-04 | マイク認識 | Not tested | — | **ランナーに実マイクが存在しない**（`--diagnose` の D-01 で確認可） |
+| T-05 | 再生デバイス認識 | Not tested | — | **ランナーに実スピーカーが存在しない**（`--diagnose` の D-02 で確認可） |
+| T-06 | マイクのプライバシー設定 | Not tested | — | 実機の Windows 設定が必要（`--diagnose` の D-03 で確認可） |
+| T-07 | 録音前のマイクレベルメーター | Not tested | — | 実音声入力が必要（`--diagnose --seconds 10` の D-04 で確認可） |
 | T-08 | 録音前のPC音声レベルメーター | Not tested | — | 実再生が必要 |
-| T-09 | **WASAPI ループバックでのPC内部音声取得** | Not tested | — | **本製品の中核。実機必須** |
+| T-09 | **WASAPI ループバックでのPC内部音声取得** | Not tested | — | **本製品の中核。実機必須**（`--diagnose --seconds 10` の D-05 で確認可） |
 | T-10 | Zoom 音声の取得 | Not tested | — | Zoom の実音声が必要 |
 | T-11 | Google Meet 音声の取得 | Not tested | — | Meet の実音声が必要 |
 | T-12 | Microsoft Teams 音声の取得 | Not tested | — | Teams の実音声が必要 |
@@ -229,9 +323,9 @@
 | T-17 | 1時間録音での同期精度 | Not tested | — | 同上 |
 | T-18 | 30分録音の安定性 | Not tested | — | 実機の長時間動作 |
 | T-19 | 1時間録音の安定性 | Not tested | — | 同上 |
-| T-20 | CPU使用率（i5-1335U） | Not tested | — | 基準PCでの実測が必要 |
+| T-20 | CPU使用率（i5-1335U） | Not tested | — | 基準PCでの実測が必要（`--diagnose` の D-06 で一部確認可） |
 | T-21 | RAM使用量 | Not tested | — | 同上 |
-| T-22 | モデルダウンロード（実通信） | Not tested | — | 実機でのUI操作が必要 |
+| T-22 | モデルダウンロード（実通信） | Not tested | — | 実機でのUI操作が必要（`--diagnose` の D-07 で一部確認可） |
 | T-23 | リアルタイム日本語文字起こし | Not tested | — | 実モデル＋実音声が必要 |
 | T-24 | 文字起こし遅延の表示 | Not tested | — | 実負荷が必要 |
 | T-25 | 小さい声・相槌の保持 | Not tested | — | 実音声が必要 |
@@ -252,9 +346,9 @@
 | T-40 | スリープ抑制 | Not tested | — | 実電源設定での確認が必要 |
 | T-41 | クラッシュ復旧（実機） | Not tested | — | 実プロセス強制終了 |
 | T-42 | 電源断からの復旧 | Not tested | — | 実電源断 |
-| T-43 | ディスク空き容量不足 | Not tested | — | 実ドライブ構成 |
+| T-43 | ディスク空き容量不足 | Not tested | — | 実ドライブ構成（`--diagnose` の D-03 で確認可） |
 | T-44 | オフライン動作 | Not tested | — | 実機のネットワーク切断 |
-| T-45 | **通信の監視（外部送信がないこと）** | Not tested | — | **実機でのパケット監視が必要。最重要確認項目** |
+| T-45 | **通信の監視（外部送信がないこと）** | Not tested | — | **実機でのパケット監視が必要。最重要確認項目**（`--diagnose` の D-08 ＋ `tools/Verify-NoNetwork.ps1` で確認可） |
 | T-46 | 抽出型議事録（実録音から） | Not tested | — | 実文字起こしが必要 |
 | T-47 | ローカルLLM議事録 | Not tested | — | 実モデル＋実機性能が必要 |
 
@@ -269,6 +363,8 @@
 | コード署名 | 未実施。SmartScreen の警告が出ます |
 | 実機での性能実測 | 未実施。`ProfileSelector` の RTF 推定値は基準機の想定値であり、実測で較正されていません（実行中の実測 RTF による自動劣化は実装済み） |
 | 話者分離の精度評価 | 未実施。合成音声での分離のみ確認しています |
+| 日本語での認識精度 | 未実施。CI で確認できたのは**英語の合成音声**までです（2.9）。日本語は T-23 |
+| コード署名の代替 | 未実施。配布 ZIP の SHA-256 は Actions のログから取得できますが、リリースに署名は付いていません |
 | OpenVINO / GPU 高速化 | 未実装（CPU のみ。要件どおり GPU 必須にはしていません） |
 
 ---
@@ -279,4 +375,15 @@
 `Windows physical machine` に、`Result` を `PASS` または `FAIL` に更新し、
 Notes に実施日・OS ビルド・使用デバイスを記載してください。
 
+最短の手順は次の 2 つです。結果をそのまま貼り付けられます。
+
+```powershell
+# D-01〜D-08（T-04/05/06/07/09/20/22/43/45 の一部）
+.\MeetingRecorder.exe --diagnose --seconds 10 --json diagnose.json
+
+# T-45（会議を録音している間、外部通信が無いことを外側から監視）
+powershell -ExecutionPolicy Bypass -File tools\Verify-NoNetwork.ps1
+```
+
 **未実施の項目を PASS にしないでください。**
+`--diagnose` が「エラー」を返した項目を PASS にするのも同様に禁止です。
