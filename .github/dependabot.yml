@@ -1,0 +1,27 @@
+version: 2
+
+# Deliberately low-noise: monthly, grouped, and limited to a couple of open PRs
+# at a time. This project ships a signed-off binary to end users, so every
+# dependency bump needs a human to re-read THIRD_PARTY_NOTICES.md and re-check
+# the licence - a daily firehose of individual PRs would work against that.
+updates:
+  - package-ecosystem: nuget
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      dotnet-test-stack:
+        patterns:
+          - "xunit*"
+          - "Microsoft.NET.Test.Sdk"
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "ci"

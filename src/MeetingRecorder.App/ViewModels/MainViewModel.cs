@@ -344,6 +344,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             _diarizer = _services.TryCreateDiarizer();
 
+            // Release the previous meeting's session before starting another.
+            _session?.Dispose();
+
             _session = new MeetingSessionManager(
                 _services.CaptureFactory,
                 _services.Transcoder,

@@ -299,6 +299,37 @@ public sealed class PipelineTests : IDisposable
         Assert.Contains("手入力した発言", File.ReadAllText(folder.TranscriptTextPath));
     }
 
+    [Fact]
+    public void ASecondRecordingCanStillSuppressSleep()
+    {
+        // The sleep preventer is shared across meetings. If a pipeline disposed
+        // the injected instance, every meeting after the first would silently
+        // let the laptop sleep mid-recording.
+        var sleepPreventer = new NullSleepPreventer();
+        var factory = new FakeCaptureFactory();
+        var settings = CreateSettings();
+        settings.SttEnabled = false;
+
+        for (var round = 0; round < 2; round++)
+        {
+            using var pipeline = new RecordingPipeline(
+                new RecordingPipelineOptions { TranscriptionEnabled = false },
+                factory,
+                new TranscriptStore(),
+                sleepPreventer);
+
+            pipeline.Start(Path.Combine(_root, $"sleep-{round}.wav"), settings, null, null, Path.Combine(_root, "spill"));
+            Assert.True(sleepPreventer.IsActive, $"round {round}: sleep suppression was not requested");
+
+            pipeline.Stop(TimeSpan.FromSeconds(5));
+            Assert.False(sleepPreventer.IsActive, $"round {round}: sleep suppression was not released");
+        }
+
+        // Still usable afterwards - it was never disposed by the pipeline.
+        Assert.True(sleepPreventer.Prevent("after both recordings"));
+        sleepPreventer.Restore();
+    }
+
     private sealed class AlwaysFailingRecognizer : ISpeechRecognizer
     {
         public string ModelId => "failing";

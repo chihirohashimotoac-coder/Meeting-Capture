@@ -607,7 +607,12 @@ public sealed class RecordingPipeline : IDisposable
         _systemSource?.Dispose();
         _scheduler?.Dispose();
         _writer?.Dispose();
-        _sleepPreventer.Dispose();
+
+        // The sleep preventer is injected and outlives this pipeline - one
+        // instance is shared by every recording in the session. Disposing it
+        // here would leave the second and later meetings unable to keep the
+        // machine awake, so only the request is released.
+        _sleepPreventer.Restore();
     }
 }
 
