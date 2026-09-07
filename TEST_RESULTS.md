@@ -36,7 +36,7 @@
 | --- | --- | --- | --- |
 | ソリューション全体の restore | GitHub Actions / windows-latest | PASS | 10 プロジェクト |
 | Release ビルド（全プロジェクト） | GitHub Actions / windows-latest | PASS | WPF アプリを含む |
-| `MeetingRecorder.Core.Tests`（120 件） | GitHub Actions / windows-latest | PASS | DSP・永続化・パイプライン・話者分離・議事録 |
+| `MeetingRecorder.Core.Tests`（121 件） | GitHub Actions / windows-latest | PASS | DSP・永続化・パイプライン・話者分離・議事録 |
 | `MeetingRecorder.Stt.Tests`（11 件） | GitHub Actions / windows-latest | PASS | モデルダウンロード整合性・認識器契約 |
 | `MeetingRecorder.Audio.Tests` | GitHub Actions / windows-latest | PASS | 実デバイス非依存の範囲のみ（下記 C も参照） |
 | `MeetingRecorder.App.Tests`（10 件） | GitHub Actions / windows-latest | PASS | 全ウィンドウの XAML ロード＋データバインド検証 |
@@ -45,7 +45,8 @@
 | AIモデルが配布物に混入しないこと | GitHub Actions / windows-latest | PASS | `*.gguf` / `ggml-*.bin` があればビルド失敗 |
 | ZIP 生成 | GitHub Actions / windows-latest | PASS | `MeetingRecorder-win-x64.zip` |
 | ZIP の内容検証 | GitHub Actions / windows-latest | PASS | 展開せずに `MeetingRecorder.exe` の存在を確認 |
-| Artifact アップロード | GitHub Actions / windows-latest | PASS | Artifact 名 `MeetingRecorder-win-x64` |
+| Artifact アップロード | GitHub Actions / windows-latest | PASS | Artifact 名 `MeetingRecorder-win-x64`（約 73 MB） |
+| llama.cpp の命令セット別レイアウト保持 | GitHub Actions / windows-latest | PASS | noavx/avx/avx2/avx512 の4種が存在し、ルートに平坦化された `llama.dll` が無いことを検証 |
 | AIモデルの SHA-256 実測 | GitHub Actions / ubuntu-latest | PASS | 全 6 モデルをダウンロードしてハッシュを取得し、カタログにピン留め |
 
 ---
@@ -104,6 +105,7 @@
 | 無音のシステム音声でもタイムラインが継続 | GitHub Actions / windows-latest | PASS | 壁時計マスタークロック |
 | STT 例外時も録音が継続 | GitHub Actions / windows-latest | PASS | |
 | セッション終了で全成果物が揃う | GitHub Actions / windows-latest | PASS | wav/txt/md/metadata、ジャーナル削除、一時ファイル削除 |
+| 2回目以降の録音でもスリープ抑制が機能する | GitHub Actions / windows-latest | PASS | 共有インスタンスを破棄しないことの検証 |
 | 中断されたセッションが復旧候補になる | GitHub Actions / windows-latest | PASS | |
 | ジャーナル再生（最終行破損を含む） | GitHub Actions / windows-latest | PASS | |
 | クラッシュ復旧で成果物を再生成 | GitHub Actions / windows-latest | PASS | |
