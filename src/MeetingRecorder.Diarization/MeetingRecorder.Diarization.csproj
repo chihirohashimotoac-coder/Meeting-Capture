@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>MeetingRecorder.Diarization</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The FFT and embedding maths are verified directly by the test suite. -->
+    <InternalsVisibleTo Include="MeetingRecorder.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MeetingRecorder.Core\MeetingRecorder.Core.csproj" />
+  </ItemGroup>
+
+</Project>

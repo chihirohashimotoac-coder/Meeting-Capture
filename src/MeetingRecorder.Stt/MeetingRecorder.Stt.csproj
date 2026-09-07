@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>MeetingRecorder.Stt</RootNamespace>
+    <!--
+      Platform neutral so the adapter layer can be compiled and unit tested on
+      any runner. The native whisper.cpp binaries come from Whisper.net.Runtime
+      and are selected per RID at publish time.
+    -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Whisper.net" />
+    <PackageReference Include="Whisper.net.Runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MeetingRecorder.Core\MeetingRecorder.Core.csproj" />
+  </ItemGroup>
+
+</Project>

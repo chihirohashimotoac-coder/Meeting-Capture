@@ -150,7 +150,8 @@ public sealed class PreflightChecker
                 PreflightSeverity.Warning,
                 "空き容量",
                 "保存先が未設定のため確認できません。",
-                "先に保存先を設定してください。");
+                "設定画面で保存先フォルダーを選択すると空き容量を確認できます。"
+                + "WAVは1時間あたり約338MB、MP3(96kbps)は約43MBを使用します。");
         }
 
         try

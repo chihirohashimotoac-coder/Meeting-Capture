@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>MeetingRecorder.Audio</RootNamespace>
+    <!--
+      The only Windows-specific project besides the WPF app. Everything here is
+      an implementation of an interface declared in MeetingRecorder.Core, which
+      is what keeps the rest of the product testable without audio hardware.
+    -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MeetingRecorder.Core\MeetingRecorder.Core.csproj" />
+  </ItemGroup>
+
+</Project>

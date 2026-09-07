@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>MeetingRecorder.Minutes</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      llama.cpp via LLamaSharp. The CPU backend is referenced explicitly: this
+      product must never require a GPU, and the minutes feature must degrade to
+      the extractive generator rather than fail on a machine without one.
+    -->
+    <PackageReference Include="LLamaSharp" />
+    <PackageReference Include="LLamaSharp.Backend.Cpu" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MeetingRecorder.Core\MeetingRecorder.Core.csproj" />
+  </ItemGroup>
+
+</Project>

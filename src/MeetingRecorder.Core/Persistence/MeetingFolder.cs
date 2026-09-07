@@ -73,10 +73,22 @@ public sealed class MeetingFolder
         return $"{stamp}_{suffix}";
     }
 
+    /// <summary>
+    /// Characters Windows rejects in a file or folder name.
+    /// </summary>
+    /// <remarks>
+    /// Spelled out rather than taken from <see cref="System.IO.Path.GetInvalidFileNameChars"/>
+    /// because that method is host-relative: on Linux it returns only NUL and
+    /// '/', so a name sanitised on a Linux CI runner would still be rejected by
+    /// the Windows machine the product actually runs on.
+    /// </remarks>
+    private static readonly char[] WindowsInvalidNameChars =
+        ("<>:\"/\\|?*" + new string(Enumerable.Range(0, 32).Select(c => (char)c).ToArray())).ToCharArray();
+
     /// <summary>Strips characters Windows rejects in a folder name.</summary>
     public static string Sanitize(string value)
     {
-        var invalid = System.IO.Path.GetInvalidFileNameChars();
+        var invalid = WindowsInvalidNameChars;
         var chars = value.Trim()
             .Select(c => invalid.Contains(c) || c == ' ' ? '_' : c)
             .ToArray();
