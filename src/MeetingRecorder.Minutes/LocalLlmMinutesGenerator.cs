@@ -246,8 +246,56 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
             warnings);
     }
 
+    private static readonly object NativeConfigSync = new();
+    private static bool _nativeConfigured;
+
+    /// <summary>
+    /// Points llama.cpp at the runtime layout the publish step preserves and
+    /// turns on instruction-set fallback.
+    /// </summary>
+    /// <remarks>
+    /// The distribution ships four CPU variants under
+    /// <c>runtimes/win-x64/native/{noavx,avx,avx2,avx512}/</c> rather than one
+    /// flattened copy, because an AVX-512 binary on a machine without AVX-512
+    /// does not fail politely - it raises an illegal instruction. Auto-fallback
+    /// walks down that list until one loads, so an older office PC still works.
+    /// <para>
+    /// The configuration must be applied before the native library loads and
+    /// throws if applied twice, hence the one-shot guard. A failure here is not
+    /// fatal: it leaves LLamaSharp on its defaults, and if that also fails the
+    /// caller falls back to the extractive generator.
+    /// </para>
+    /// </remarks>
+    private void ConfigureNativeLibraryOnce()
+    {
+        lock (NativeConfigSync)
+        {
+            if (_nativeConfigured)
+            {
+                return;
+            }
+
+            _nativeConfigured = true;
+
+            try
+            {
+                NativeLibraryConfig.All
+                    .WithSearchDirectory(AppContext.BaseDirectory)
+                    .WithAutoFallback(true);
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn(
+                    nameof(LocalLlmMinutesGenerator),
+                    $"Could not configure the llama.cpp native search path; using defaults: {ex.Message}");
+            }
+        }
+    }
+
     private StatelessExecutor CreateExecutor()
     {
+        ConfigureNativeLibraryOnce();
+
         _weights ??= LLamaWeights.LoadFromFile(new ModelParams(_modelPath)
         {
             ContextSize = _contextSize,

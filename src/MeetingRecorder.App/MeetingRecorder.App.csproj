@@ -29,6 +29,31 @@
     <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
   </PropertyGroup>
 
+  <!--
+    llama.cpp ships four CPU variants (noavx / avx / avx2 / avx512) of the same
+    five DLLs. A RID-specific publish normally flattens everything under
+    runtimes/<rid>/native/ into the output root, so the four variants collide on
+    one file name and the SDK fails with NETSDK1152.
+
+    Flattening would also be wrong even if it succeeded: whichever variant won
+    would be the only one shipped, and an AVX-512 binary on a machine without
+    AVX-512 crashes with an illegal instruction. LLamaSharp is designed to probe
+    runtimes/<rid>/native/<variant>/ at run time and fall back down the list, so
+    the fix is to keep that layout instead of collapsing it.
+  -->
+  <Target Name="PreserveLlamaCppRuntimeLayout" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <_LlamaCppNative Include="@(ResolvedFileToPublish)"
+                       Condition="'%(ResolvedFileToPublish.NuGetPackageId)' == 'LLamaSharp.Backend.Cpu'" />
+      <ResolvedFileToPublish Remove="@(_LlamaCppNative)" />
+      <ResolvedFileToPublish Include="@(_LlamaCppNative)">
+        <RelativePath>%(_LlamaCppNative.PathInPackage)</RelativePath>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+    <Message Importance="high"
+             Text="llama.cpp native layout preserved for @(_LlamaCppNative->Count()) file(s)." />
+  </Target>
+
   <ItemGroup>
     <ProjectReference Include="..\MeetingRecorder.Core\MeetingRecorder.Core.csproj" />
     <ProjectReference Include="..\MeetingRecorder.Audio\MeetingRecorder.Audio.csproj" />
