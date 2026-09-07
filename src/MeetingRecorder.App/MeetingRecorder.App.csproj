@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>MeetingRecorder.App</RootNamespace>
+    <AssemblyName>MeetingRecorder</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!--
+      Portable distribution: the ZIP is unpacked anywhere and MeetingRecorder.exe
+      is started directly. No installer, no admin rights, no pre-installed
+      runtime - so the publish is self-contained.
+    -->
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>false</PublishSingleFile>
+    <!--
+      Trimming is off deliberately: WPF is not trim-compatible, and both
+      Whisper.net and LLamaSharp resolve native assets and types reflectively.
+      A slightly larger ZIP is a fair price for a build that actually runs.
+    -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <SatelliteResourceLanguages>en;ja</SatelliteResourceLanguages>
+
+    <!-- No telemetry of any kind reaches the network from this application. -->
+    <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MeetingRecorder.Core\MeetingRecorder.Core.csproj" />
+    <ProjectReference Include="..\MeetingRecorder.Audio\MeetingRecorder.Audio.csproj" />
+    <ProjectReference Include="..\MeetingRecorder.Stt\MeetingRecorder.Stt.csproj" />
+    <ProjectReference Include="..\MeetingRecorder.Diarization\MeetingRecorder.Diarization.csproj" />
+    <ProjectReference Include="..\MeetingRecorder.Minutes\MeetingRecorder.Minutes.csproj" />
+  </ItemGroup>
+
+</Project>

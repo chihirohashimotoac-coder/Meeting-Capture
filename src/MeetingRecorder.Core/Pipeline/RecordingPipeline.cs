@@ -155,7 +155,8 @@ public sealed class RecordingPipeline : IDisposable
         AppSettings settings,
         ISpeechRecognizer? recognizer,
         RecoveryJournal? journal,
-        string spillDirectory)
+        string spillDirectory,
+        ISpeakerDiarizer? diarizer = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -213,7 +214,14 @@ public sealed class RecordingPipeline : IDisposable
 
         if (_options.TranscriptionEnabled && recognizer is not null)
         {
-            _scheduler = new SttScheduler(spillDirectory, _logger) { Language = settings.SttLanguage };
+            _scheduler = new SttScheduler(spillDirectory, _logger)
+            {
+                Language = settings.SttLanguage,
+                // Diarization runs on the transcription worker, behind the same
+                // queue, so it can never slow capture down. It is also the first
+                // thing the degradation ladder switches off.
+                Diarizer = _options.Profile.DiarizationEnabled ? diarizer : null,
+            };
             _scheduler.SegmentRecognized += OnSegmentRecognized;
             _scheduler.RecognizerFailed += OnRecognizerFailed;
             _scheduler.Start(recognizer);

@@ -123,7 +123,7 @@ public sealed class MeetingSessionManager : IDisposable
         _pipeline.StatusChanged += status => StatusChanged?.Invoke(status);
 
         var spill = Path.Combine(_folder.Path, ".stt-spill");
-        _pipeline.Start(_folder.WavPath, settings, recognizer, _journal, spill);
+        _pipeline.Start(_folder.WavPath, settings, recognizer, _journal, spill, diarizer);
 
         _logger.Info(nameof(MeetingSessionManager), $"Meeting '{_folder.Name}' started.");
         return _folder;

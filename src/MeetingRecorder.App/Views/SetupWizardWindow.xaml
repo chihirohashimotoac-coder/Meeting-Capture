@@ -1,0 +1,68 @@
+<Window x:Class="MeetingRecorder.App.Views.SetupWizardWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="MeetingRecorder — 初回設定"
+        Height="700" Width="800"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,16">
+            <TextBlock Text="初回設定" FontSize="20" FontWeight="Bold" Margin="0,0,0,6" />
+            <TextBlock TextWrapping="Wrap"
+                       Text="録音に使用するデバイスと保存先を設定します。会議の音声・文字起こし・議事録が外部へ送信されることはありません。外部通信はAIモデルのダウンロード時のみ行われます。" />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <TextBlock Text="1. マイク（同じ部屋の参加者の音声）" Style="{StaticResource SectionHeader}" FontSize="15" />
+                <ComboBox x:Name="MicCombo" DisplayMemberPath="Name" Margin="0,6,0,4" />
+                <TextBlock x:Name="MicStatusText" FontSize="11" Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,18" />
+
+                <TextBlock Text="2. PC内部音声（Zoom / Teams / Meet などの再生音）" Style="{StaticResource SectionHeader}" FontSize="15" />
+                <ComboBox x:Name="RenderCombo" DisplayMemberPath="Name" Margin="0,6,0,4" />
+                <TextBlock x:Name="RenderStatusText" FontSize="11" Foreground="{StaticResource MutedTextBrush}"
+                           Margin="0,0,0,4" />
+                <TextBlock FontSize="11" Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,18"
+                           Text="WASAPIループバックで、選択した再生デバイスから出力される音声をそのまま録音します。仮想オーディオドライバのインストールや管理者権限は不要です。" />
+
+                <TextBlock Text="3. 保存先" Style="{StaticResource SectionHeader}" FontSize="15" />
+                <Grid Margin="0,6,0,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox Grid.Column="0" x:Name="SaveRootBox" VerticalAlignment="Center" Margin="0,0,8,0" />
+                    <Button Grid.Column="1" Content="参照..." Click="OnBrowse" Margin="0" />
+                </Grid>
+                <TextBlock FontSize="11" Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,18"
+                           Text="会議ごとに「2026-09-07_1430_Meeting」のようなフォルダーが作成され、音声・文字起こし・議事録が保存されます。" />
+
+                <TextBlock Text="4. 音声認識モデル" Style="{StaticResource SectionHeader}" FontSize="15" />
+                <TextBlock x:Name="ProfileText" TextWrapping="Wrap" Margin="0,6,0,6" />
+                <ComboBox x:Name="ModelCombo" DisplayMemberPath="Label" Margin="0,0,0,8" />
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                    <Button Content="PC性能を測定" Click="OnBenchmark" MinWidth="130" />
+                    <Button Content="モデルをダウンロード" Click="OnDownload" MinWidth="170" Margin="0" />
+                </StackPanel>
+                <TextBlock x:Name="ModelStatusText" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,6" />
+                <TextBlock FontSize="11" Foreground="{StaticResource MutedTextBrush}"
+                           Text="モデルを取得しなくても録音は利用できます（その場合、文字起こしのみ行われません）。" />
+            </StackPanel>
+        </ScrollViewer>
+
+        <TextBlock Grid.Row="2" x:Name="StatusText" Margin="0,12,0,0"
+                   Foreground="{StaticResource MutedTextBrush}" />
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="設定を保存して開始" Click="OnFinish" MinWidth="180" FontWeight="SemiBold" />
+            <Button Content="終了" Click="OnQuit" Margin="0" />
+        </StackPanel>
+    </Grid>
+</Window>

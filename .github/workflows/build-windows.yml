@@ -1,0 +1,154 @@
+name: Windows build
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: this workflow only reads the repository and uploads
+# artifacts (which needs no extra permission). Nothing here writes to the repo,
+# creates releases, or requests an OIDC token.
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  ARTIFACT_NAME: MeetingRecorder-win-x64
+
+jobs:
+  build:
+    name: Build, test and package (win-x64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Record the commit each action resolved to
+        shell: bash
+        run: |
+          # Supply-chain record: prints the commit behind every action tag used
+          # here, so a reviewer can confirm what actually ran.
+          for action in actions/checkout actions/setup-dotnet actions/upload-artifact; do
+            sha=$(git ls-remote "https://github.com/$action" 'refs/tags/v4^{}' | cut -f1)
+            echo "$action@v4 -> ${sha:-<unresolved>}"
+          done
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/Directory.Packages.props', '**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore MeetingRecorder.sln
+
+      - name: Build (Release)
+        run: dotnet build MeetingRecorder.sln --configuration Release --no-restore
+
+      - name: Test
+        run: >
+          dotnet test MeetingRecorder.sln
+          --configuration Release
+          --no-build
+          --logger "trx;LogFileName=test-results.trx"
+          --results-directory ${{ github.workspace }}/TestResults
+
+      - name: Publish self-contained win-x64
+        run: >
+          dotnet publish src/MeetingRecorder.App/MeetingRecorder.App.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          --output ${{ github.workspace }}/publish/${{ env.ARTIFACT_NAME }}
+
+      - name: Add distribution documents
+        shell: pwsh
+        run: |
+          $target = "${{ github.workspace }}/publish/${{ env.ARTIFACT_NAME }}"
+          Copy-Item packaging/README.txt        -Destination "$target/README.txt"        -Force
+          Copy-Item LICENSE                     -Destination "$target/LICENSE"           -Force
+          Copy-Item THIRD_PARTY_NOTICES.md      -Destination "$target/THIRD_PARTY_NOTICES.md" -Force
+
+      - name: Verify the publish output is actually runnable
+        shell: pwsh
+        run: |
+          $target = "${{ github.workspace }}/publish/${{ env.ARTIFACT_NAME }}"
+          $exe = Join-Path $target "MeetingRecorder.exe"
+          if (-not (Test-Path $exe)) { throw "MeetingRecorder.exe is missing from the publish output." }
+
+          # A self-contained publish must carry its own runtime: if these are
+          # absent the ZIP would need .NET installed on the user's PC, which the
+          # requirements forbid.
+          foreach ($required in @("hostfxr.dll", "coreclr.dll", "PresentationFramework.dll", "MeetingRecorder.Core.dll")) {
+            if (-not (Test-Path (Join-Path $target $required))) { throw "Self-contained publish is missing $required." }
+          }
+
+          # The native speech backend has to ship with the app.
+          $whisper = Get-ChildItem -Path $target -Recurse -Filter "*whisper*" -File
+          if ($whisper.Count -eq 0) { throw "No whisper.cpp native binary found in the publish output." }
+
+          # AI model weights must never be in the distribution.
+          $models = Get-ChildItem -Path $target -Recurse -Include *.gguf, ggml-*.bin -File
+          if ($models.Count -gt 0) { throw "AI model files must not be packaged: $($models.Name -join ', ')" }
+
+          Write-Host "Publish output verified."
+          "Size: {0:N1} MB" -f ((Get-ChildItem $target -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+
+      - name: Create MeetingRecorder-win-x64.zip
+        shell: pwsh
+        run: |
+          $target = "${{ github.workspace }}/publish/${{ env.ARTIFACT_NAME }}"
+          $zip = "${{ github.workspace }}/artifacts/${{ env.ARTIFACT_NAME }}.zip"
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}/artifacts" | Out-Null
+          Compress-Archive -Path "$target/*" -DestinationPath $zip -CompressionLevel Optimal -Force
+          "ZIP size: {0:N1} MB" -f ((Get-Item $zip).Length / 1MB)
+
+      - name: Verify the ZIP opens and contains the executable
+        shell: pwsh
+        run: |
+          $zip = "${{ github.workspace }}/artifacts/${{ env.ARTIFACT_NAME }}.zip"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            if (-not ($archive.Entries.Name -contains "MeetingRecorder.exe")) {
+              throw "MeetingRecorder.exe is not in the ZIP."
+            }
+            Write-Host "ZIP contains $($archive.Entries.Count) entries."
+          } finally {
+            $archive.Dispose()
+          }
+
+      - name: Upload distribution artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ github.workspace }}/artifacts/${{ env.ARTIFACT_NAME }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ${{ github.workspace }}/TestResults
+          if-no-files-found: warn
+          retention-days: 14

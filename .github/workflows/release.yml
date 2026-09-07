@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build a draft release for (e.g. v0.1.0)'
+        required: true
+        type: string
+
+# contents: write is required to create the release, and is granted only to the
+# job that needs it. The release is always created as a draft: publishing is a
+# deliberate human action, so a stray tag can never ship a build to users.
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  ARTIFACT_NAME: MeetingRecorder-win-x64
+
+jobs:
+  package:
+    name: Build the release package
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore MeetingRecorder.sln
+
+      - name: Build (Release)
+        run: dotnet build MeetingRecorder.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test MeetingRecorder.sln --configuration Release --no-build
+
+      - name: Publish self-contained win-x64
+        run: >
+          dotnet publish src/MeetingRecorder.App/MeetingRecorder.App.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          --output ${{ github.workspace }}/publish/${{ env.ARTIFACT_NAME }}
+
+      - name: Add distribution documents
+        shell: pwsh
+        run: |
+          $target = "${{ github.workspace }}/publish/${{ env.ARTIFACT_NAME }}"
+          Copy-Item packaging/README.txt   -Destination "$target/README.txt" -Force
+          Copy-Item LICENSE                -Destination "$target/LICENSE" -Force
+          Copy-Item THIRD_PARTY_NOTICES.md -Destination "$target/THIRD_PARTY_NOTICES.md" -Force
+
+      - name: Create ZIP and checksum
+        shell: pwsh
+        run: |
+          $target = "${{ github.workspace }}/publish/${{ env.ARTIFACT_NAME }}"
+          $dir = "${{ github.workspace }}/artifacts"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $zip = Join-Path $dir "${{ env.ARTIFACT_NAME }}.zip"
+          Compress-Archive -Path "$target/*" -DestinationPath $zip -CompressionLevel Optimal -Force
+
+          # A published ZIP that users download should be verifiable.
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ env.ARTIFACT_NAME }}.zip" | Out-File -FilePath (Join-Path $dir "SHA256SUMS.txt") -Encoding ascii
+          Write-Host "SHA-256: $hash"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ github.workspace }}/artifacts/*
+          if-no-files-found: error
+
+  draft-release:
+    name: Create a draft GitHub Release
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: MeetingRecorder-win-x64
+          path: dist
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          checksum=$(cut -d' ' -f1 dist/SHA256SUMS.txt)
+
+          notes=$(cat <<NOTES
+          ## MeetingRecorder ${TAG}
+
+          Windows 11 / x64 向けのポータブル会議録音・リアルタイム文字起こしアプリケーションです。
+
+          ### インストール
+          1. \`MeetingRecorder-win-x64.zip\` をダウンロードして展開します。
+          2. \`MeetingRecorder.exe\` を起動します。インストールも管理者権限も不要です。
+
+          ### 検証
+          \`\`\`
+          SHA-256  ${checksum}
+          \`\`\`
+
+          ### 注意
+          - AIモデルは同梱していません。初回起動時にアプリからダウンロードしてください。
+          - 実機での動作確認項目は \`docs/WINDOWS_E2E_TEST.md\` を参照してください。
+            CIのビルド成功は実機動作の確認を意味しません。
+          NOTES
+          )
+
+          # Always a draft: a human reviews and publishes it. This is what keeps
+          # an accidental tag push from distributing an unverified build.
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "MeetingRecorder $TAG" \
+            --notes "$notes" \
+            --draft \
+            dist/MeetingRecorder-win-x64.zip \
+            dist/SHA256SUMS.txt
