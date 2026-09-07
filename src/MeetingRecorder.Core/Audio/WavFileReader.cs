@@ -16,7 +16,13 @@ public sealed class WavFileReader : IDisposable
 
     public WavFileReader(string path)
     {
-        _stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024);
+        // FileShare.ReadWrite, not FileShare.Read: the file may still be open for
+        // writing by an in-progress recording. On Windows a reader that does not
+        // permit the existing writer's access gets a sharing violation, so a
+        // recording in progress could not be inspected - and the crash-safety
+        // guarantee ("the file on disk is playable at any moment") would only
+        // hold once the process had exited.
+        _stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024);
         _reader = new BinaryReader(_stream, Encoding.ASCII);
         ParseHeader();
     }
