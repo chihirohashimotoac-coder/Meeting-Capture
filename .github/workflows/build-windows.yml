@@ -45,6 +45,15 @@ jobs:
             echo "$action@v4 -> ${sha:-<unresolved>}"
           done
 
+      - name: Lint the workflows
+        shell: pwsh
+        run: |
+          # Catches the Windows PowerShell 5.1 encoding trap (a non-ASCII literal
+          # in a `shell: powershell` step breaks the parser, not just the
+          # display) and missing least-privilege permissions.
+          python -m pip install --quiet --disable-pip-version-check pyyaml
+          python tools/check_workflows.py
+
       - name: Check the PowerShell helper scripts parse
         shell: pwsh
         run: |
@@ -125,6 +134,12 @@ jobs:
         id: speech
         # Windows PowerShell 5.1: System.Speech is not part of the .NET Core BCL
         # that pwsh 7 loads, so SAPI is only reachable from the desktop runtime.
+        #
+        # This script is deliberately pure ASCII. Windows PowerShell 5.1 reads a
+        # .ps1 without a BOM as ANSI, and the runner writes step scripts as UTF-8
+        # without one - so a Japanese string literal here does not merely display
+        # wrongly, it breaks the parser and the whole step fails to compile. The
+        # sample sentences therefore live in files that are read as UTF-8.
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -138,6 +153,7 @@ jobs:
 
             $voices = $synth.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo }
             Write-Host "Installed voices: $($voices.Name -join ', ')"
+            if (-not $voices) { throw "No speech voices are installed on this runner." }
 
             # Prefer Japanese, because that is what the product transcribes.
             # Windows Server images normally ship only en-US voices, so the
@@ -145,14 +161,17 @@ jobs:
             $japanese = $voices | Where-Object { $_.Culture.Name -like 'ja*' } | Select-Object -First 1
             if ($japanese) {
               $synth.SelectVoice($japanese.Name)
-              $text = "本日の会議を開始します。前月の予算実績について確認します。"
+              $sampleFile = "${{ github.workspace }}/tools/speech-sample-ja.txt"
               $language = "ja"
               $expect = ""
             } else {
-              $text = "This is a meeting recorder test. The quarterly budget review is scheduled for Monday."
+              $sampleFile = "${{ github.workspace }}/tools/speech-sample-en.txt"
               $language = "en"
               $expect = "meeting,recorder,test,budget,review,monday"
             }
+
+            $text = [System.IO.File]::ReadAllText($sampleFile, [System.Text.Encoding]::UTF8).Trim()
+            Write-Host "Language: $language"
 
             $format = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)
             $synth.SetOutputToWaveFile($path, $format)
@@ -164,9 +183,9 @@ jobs:
             if ($size -lt 20000) { throw "The synthesised WAV is only $size bytes; no usable audio was produced." }
 
             Write-Host "Synthesised $size bytes of $language speech."
-            "synthesized=true"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
-            "language=$language"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
-            "expect=$expect"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+            "synthesized=true"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+            "language=$language" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+            "expect=$expect"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
           } catch {
             # No voice on the image is a real possibility. Say so loudly instead
             # of letting the real-engine test quietly not run.
