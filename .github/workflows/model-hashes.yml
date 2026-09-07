@@ -38,5 +38,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check the catalog parses before downloading anything
+        # A mis-parsed catalog would hash the wrong files and report a false
+        # result either way, so this runs first and costs no bandwidth.
+        run: python3 tools/model_checksums.py selftest
+
       - name: Verify pinned SHA-256 values
         run: python3 tools/model_checksums.py "${{ inputs.mode || 'verify' }}"

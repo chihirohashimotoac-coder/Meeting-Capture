@@ -31,12 +31,30 @@ public class ModelCatalogTests
     }
 
     [Fact]
-    public void PinnedHashesAreWellFormedWhenPresent()
+    public void EveryModelHasAPinnedSha256()
     {
-        foreach (var model in ModelCatalog.All.Where(m => m.Sha256 is not null))
+        // Without a pin the downloader can only record what it received, not
+        // verify it. Every catalog entry's hash was measured by downloading the
+        // real file in CI, so a new entry without one is a mistake.
+        foreach (var model in ModelCatalog.All)
         {
+            Assert.False(string.IsNullOrWhiteSpace(model.Sha256), $"{model.Id} has no pinned SHA-256");
             Assert.Equal(64, model.Sha256!.Length);
             Assert.True(model.Sha256.All(Uri.IsHexDigit), $"{model.Id} has a non-hex SHA-256");
+        }
+    }
+
+    [Fact]
+    public void EveryUrlPointsAtAModelFileRatherThanAPage()
+    {
+        // Guards the mistake the checksum tool once made: matching LicenseUrl
+        // instead of Url, and cheerfully "verifying" licence pages.
+        foreach (var model in ModelCatalog.All)
+        {
+            Assert.True(
+                model.Url.EndsWith(".bin", StringComparison.Ordinal) || model.Url.EndsWith(".gguf", StringComparison.Ordinal),
+                $"{model.Id} does not download a model file: {model.Url}");
+            Assert.EndsWith(model.FileName, model.Url, StringComparison.Ordinal);
         }
     }
 
