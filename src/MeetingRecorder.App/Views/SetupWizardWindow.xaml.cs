@@ -1,4 +1,3 @@
-using System.IO;
 using System.Windows;
 using MeetingRecorder.App.Services;
 using MeetingRecorder.Core.Diagnostics;
