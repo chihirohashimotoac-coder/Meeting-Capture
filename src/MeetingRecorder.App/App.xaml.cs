@@ -15,6 +15,15 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // Headless self-check. Runs the same code paths the recorder uses, on the
+        // user's real hardware, and exits - no window is ever shown.
+        if (ConsoleDiagnostics.IsRequested(e.Args))
+        {
+            var exitCode = ConsoleDiagnostics.Run(e.Args);
+            Shutdown(exitCode);
+            return;
+        }
+
         // Unhandled exceptions are logged locally and shown to the user. They are
         // never transmitted anywhere: this application has no crash reporting
         // service and no telemetry of any kind.

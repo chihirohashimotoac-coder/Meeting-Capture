@@ -45,6 +45,26 @@ jobs:
             echo "$action@v4 -> ${sha:-<unresolved>}"
           done
 
+      - name: Check the PowerShell helper scripts parse
+        shell: pwsh
+        run: |
+          # tools/*.ps1 are run by users on their own machines, so a syntax
+          # error would only be discovered by the person trying to verify the
+          # product's privacy claim. Parse them here instead.
+          $failed = $false
+          Get-ChildItem -Path tools -Filter *.ps1 -Recurse | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors -and $errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "::error::$($_.Name) has $($errors.Count) parse error(s)"
+              $errors | ForEach-Object { Write-Host "  $($_.Extent.StartLineNumber): $($_.Message)" }
+            } else {
+              Write-Host "$($_.Name): OK"
+            }
+          }
+          if ($failed) { throw "One or more PowerShell scripts failed to parse." }
+
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v4
         with:
@@ -70,6 +90,107 @@ jobs:
           --no-build
           --logger "trx;LogFileName=test-results.trx"
           --results-directory ${{ github.workspace }}/TestResults
+
+      # ---- Real-engine verification -----------------------------------------
+      # Everything above this point uses test doubles for speech recognition.
+      # The next three steps run the actual whisper.cpp engine over actual
+      # speech, which is what shows the native binary loads and that the
+      # chunker feeds it something it can transcribe.
+
+      - name: Cache the speech model used for the real-engine test
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.test-model
+          key: whisper-tiny-q5_1-818710568da3
+
+      - name: Download the speech model
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $dir = "${{ github.workspace }}/.test-model"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $path = Join-Path $dir "ggml-tiny-q5_1.bin"
+
+          # The same URL and the same pinned hash the application uses, so this
+          # doubles as a check that the pin still matches what is published.
+          Invoke-WebRequest -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin" -OutFile $path
+
+          $expected = "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7"
+          $actual = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "Model SHA-256 mismatch. expected=$expected actual=$actual" }
+          Write-Host "Model downloaded and SHA-256 verified against the pinned value."
+
+      - name: Synthesise speech for the real-engine test
+        id: speech
+        # Windows PowerShell 5.1: System.Speech is not part of the .NET Core BCL
+        # that pwsh 7 loads, so SAPI is only reachable from the desktop runtime.
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = "${{ github.workspace }}/.test-audio"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $path = Join-Path $dir "speech.wav"
+
+          try {
+            Add-Type -AssemblyName System.Speech
+            $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+
+            $voices = $synth.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo }
+            Write-Host "Installed voices: $($voices.Name -join ', ')"
+
+            # Prefer Japanese, because that is what the product transcribes.
+            # Windows Server images normally ship only en-US voices, so the
+            # language actually used is reported rather than assumed.
+            $japanese = $voices | Where-Object { $_.Culture.Name -like 'ja*' } | Select-Object -First 1
+            if ($japanese) {
+              $synth.SelectVoice($japanese.Name)
+              $text = "本日の会議を開始します。前月の予算実績について確認します。"
+              $language = "ja"
+              $expect = ""
+            } else {
+              $text = "This is a meeting recorder test. The quarterly budget review is scheduled for Monday."
+              $language = "en"
+              $expect = "meeting,recorder,test,budget,review,monday"
+            }
+
+            $format = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)
+            $synth.SetOutputToWaveFile($path, $format)
+            $synth.Rate = -1
+            $synth.Speak($text)
+            $synth.Dispose()
+
+            $size = (Get-Item $path).Length
+            if ($size -lt 20000) { throw "The synthesised WAV is only $size bytes; no usable audio was produced." }
+
+            Write-Host "Synthesised $size bytes of $language speech."
+            "synthesized=true"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+            "language=$language"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+            "expect=$expect"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          } catch {
+            # No voice on the image is a real possibility. Say so loudly instead
+            # of letting the real-engine test quietly not run.
+            Write-Host "::warning::Speech synthesis unavailable on this runner: $($_.Exception.Message)"
+            Write-Host "::warning::The real-engine speech recognition test will NOT run for this build."
+            "synthesized=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          }
+
+      - name: Run speech recognition against the real model
+        if: steps.speech.outputs.synthesized == 'true'
+        env:
+          MEETINGRECORDER_TEST_MODEL: ${{ github.workspace }}/.test-model/ggml-tiny-q5_1.bin
+          MEETINGRECORDER_TEST_AUDIO: ${{ github.workspace }}/.test-audio/speech.wav
+          MEETINGRECORDER_TEST_LANGUAGE: ${{ steps.speech.outputs.language }}
+          MEETINGRECORDER_TEST_EXPECT: ${{ steps.speech.outputs.expect }}
+          # Turns "fixtures missing, skipping" into a failure, so a broken
+          # fixture step cannot silently disable this verification.
+          MEETINGRECORDER_REQUIRE_REAL_STT: '1'
+        run: >
+          dotnet test tests/MeetingRecorder.Stt.Tests/MeetingRecorder.Stt.Tests.csproj
+          --configuration Release
+          --no-build
+          --filter "FullyQualifiedName~RealModelRecognitionTests"
+          --logger "console;verbosity=detailed"
 
       - name: Publish self-contained win-x64
         run: >
@@ -148,6 +269,51 @@ jobs:
             $archive.Dispose()
           }
 
+      - name: Run the packaged application's own self-diagnosis
+        shell: pwsh
+        # Launches the real MeetingRecorder.exe from the publish output. This is
+        # the only step that runs the shipped binary, and it exercises device
+        # enumeration, the pre-flight checks and the connection inspector on a
+        # real Windows machine.
+        #
+        # A GitHub runner has no audio hardware, so the report is EXPECTED to
+        # contain device errors. What is being verified here is that the
+        # executable starts, runs its checks and reports honestly - not that
+        # audio works. Whether audio works can only be established on a physical
+        # machine (docs/WINDOWS_E2E_TEST.md).
+        run: |
+          $exe = "${{ github.workspace }}/publish/${{ env.ARTIFACT_NAME }}/MeetingRecorder.exe"
+          $json = "${{ github.workspace }}/artifacts/diagnose.json"
+
+          # --seconds 0 skips the live capture probe: with no endpoints to open
+          # there is nothing to listen to.
+          $process = Start-Process -FilePath $exe `
+            -ArgumentList '--diagnose', '--seconds', '0', '--json', $json `
+            -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput "${{ github.workspace }}/artifacts/diagnose.txt" `
+            -RedirectStandardError  "${{ github.workspace }}/artifacts/diagnose.err"
+
+          Write-Host "--- diagnose stdout ---"
+          if (Test-Path "${{ github.workspace }}/artifacts/diagnose.txt") {
+            Get-Content "${{ github.workspace }}/artifacts/diagnose.txt" | Write-Host
+          }
+          Write-Host "--- diagnose stderr ---"
+          if (Test-Path "${{ github.workspace }}/artifacts/diagnose.err") {
+            Get-Content "${{ github.workspace }}/artifacts/diagnose.err" | Write-Host
+          }
+          Write-Host "--- exit code: $($process.ExitCode) ---"
+
+          if (-not (Test-Path $json)) {
+            throw "The packaged application did not produce a diagnostic report; it may have failed to start."
+          }
+
+          $report = Get-Content $json -Raw | ConvertFrom-Json
+          if ($report.checks.Count -lt 5) {
+            throw "The diagnostic report contains only $($report.checks.Count) checks; it did not run properly."
+          }
+
+          Write-Host "The packaged executable ran $($report.checks.Count) self-checks. Overall: $($report.overall)"
+
       - name: Upload distribution artifact
         uses: actions/upload-artifact@v4
         with:
@@ -161,6 +327,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results
-          path: ${{ github.workspace }}/TestResults
+          path: |
+            ${{ github.workspace }}/TestResults
+            ${{ github.workspace }}/artifacts/diagnose.txt
+            ${{ github.workspace }}/artifacts/diagnose.json
           if-no-files-found: warn
           retention-days: 14
