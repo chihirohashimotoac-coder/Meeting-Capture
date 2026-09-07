@@ -1,5 +1,6 @@
 using System.Windows;
 using MeetingRecorder.App.Services;
+using MeetingRecorder.Core.Diagnostics;
 using MeetingRecorder.Core.ModelManagement;
 
 namespace MeetingRecorder.App.Views;
@@ -92,7 +93,6 @@ public partial class ModelDownloadWindow : Window
             ProgressText.Text = $"ダウンロードが完了しました（{result.SizeBytes / 1024.0 / 1024.0:F1} MB）。";
             Progress.Value = 1;
             CloseButton.Content = "閉じる";
-            DialogResult = true;
         }
         catch (OperationCanceledException)
         {

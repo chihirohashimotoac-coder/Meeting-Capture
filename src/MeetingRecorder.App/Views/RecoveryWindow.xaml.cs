@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Windows;
 using MeetingRecorder.App.Services;
+using MeetingRecorder.Core.Diagnostics;
 using MeetingRecorder.Core.Persistence;
 
 namespace MeetingRecorder.App.Views;

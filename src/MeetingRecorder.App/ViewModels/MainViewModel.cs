@@ -7,6 +7,7 @@ using MeetingRecorder.App.Services;
 using MeetingRecorder.App.Views;
 using MeetingRecorder.Core.Audio;
 using MeetingRecorder.Core.Diagnostics;
+using MeetingRecorder.Core.Dsp;
 using MeetingRecorder.Core.ModelManagement;
 using MeetingRecorder.Core.Models;
 using MeetingRecorder.Core.Persistence;
@@ -298,7 +299,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    private void UpdateMeters(Core.Dsp.LevelSnapshot mic, Core.Dsp.LevelSnapshot system)
+    private void UpdateMeters(LevelSnapshot mic, LevelSnapshot system)
     {
         MicLevel = mic.Normalized();
         MicPeakLevel = mic.NormalizedPeak();
@@ -309,8 +310,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         SystemLevelText = FormatLevel(system);
     }
 
-    private static string FormatLevel(Core.Dsp.LevelSnapshot snapshot)
-        => snapshot.PeakDb <= Core.Dsp.AudioMath.MinDb + 1
+    private static string FormatLevel(LevelSnapshot snapshot)
+        => snapshot.PeakDb <= AudioMath.MinDb + 1
             ? "無信号"
             : $"{snapshot.RmsDb:F0} dBFS (peak {snapshot.PeakDb:F0})";
 

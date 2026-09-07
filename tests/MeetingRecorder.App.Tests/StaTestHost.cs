@@ -57,7 +57,7 @@ public static class StaTestHost
             {
                 if (Application.Current is null)
                 {
-                    var application = new MeetingRecorder.App.App();
+                    var application = new global::MeetingRecorder.App.App();
 
                     // Loads App.xaml's resource dictionary, which the windows
                     // reference through {StaticResource}.

@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows;
 using MeetingRecorder.App.Services;
+using MeetingRecorder.Core.Diagnostics;
 using MeetingRecorder.Core.Audio;
 using MeetingRecorder.Core.ModelManagement;
 using MeetingRecorder.Core.Persistence;

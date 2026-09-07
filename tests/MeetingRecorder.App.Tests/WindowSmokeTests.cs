@@ -3,6 +3,8 @@ using MeetingRecorder.App.Services;
 using MeetingRecorder.App.ViewModels;
 using MeetingRecorder.App.Views;
 using MeetingRecorder.Core.Models;
+using MeetingRecorder.Core.ModelManagement;
+using MeetingRecorder.Core.Persistence;
 using MeetingRecorder.Core.Pipeline;
 using Xunit;
 
@@ -110,7 +112,7 @@ public class WindowSmokeTests
 
             try
             {
-                var folder = Core.Persistence.MeetingFolder.Create(root, DateTimeOffset.Now);
+                var folder = MeetingFolder.Create(root, DateTimeOffset.Now);
                 var metadata = new MeetingMetadata { FolderName = folder.Name, StartedAtLocal = DateTimeOffset.Now };
                 var meeting = new RecoverableMeeting(folder, metadata, 3, 42.0);
 
@@ -160,8 +162,7 @@ public class WindowSmokeTests
             using var services = new AppServices();
             using var scope = new BindingErrorScope();
 
-            var descriptor = Core.ModelManagement.ModelCatalog.RequireSpeechModel(
-                Core.ModelManagement.ModelCatalog.WhisperBase);
+            var descriptor = ModelCatalog.RequireSpeechModel(ModelCatalog.WhisperBase);
 
             // Construct the dialog only; nothing is downloaded until the user
             // presses the button, so this test performs no network access.
