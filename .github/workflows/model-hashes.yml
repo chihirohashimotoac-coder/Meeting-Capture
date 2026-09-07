@@ -1,21 +1,34 @@
-name: Resolve model checksums
+name: Verify model checksums
 
-# Maintenance workflow. It downloads every model in ModelCatalog and prints its
-# SHA-256 so the catalog can pin a verified hash. It is not part of the build,
-# never runs automatically on a normal push, and produces no artifact that ships
-# to users.
+# Maintenance workflow, run on demand only.
+#
+# The application refuses to install an AI model whose SHA-256 does not match the
+# value pinned in ModelCatalog.cs. Those pins were measured by this workflow, and
+# this workflow re-measures them: run "verify" to confirm the pins still match
+# what the publisher serves, or "refresh" to print new values after a publisher
+# re-uploads a file.
+#
+# It downloads several GB, so it is never attached to a normal push.
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - '.github/workflows/model-hashes.yml'
+    inputs:
+      mode:
+        description: 'verify (fail on mismatch) or refresh (print measured values)'
+        required: true
+        default: verify
+        type: choice
+        options: [verify, refresh]
+  schedule:
+    # Monthly drift check: an upstream re-upload would otherwise only be
+    # discovered by a user whose download suddenly fails verification.
+    - cron: '0 3 1 * *'
 
 permissions:
   contents: read
 
 jobs:
   checksums:
-    name: Download models and print SHA-256
+    name: Measure the published model files
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -25,26 +38,5 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Extract the model URLs from the catalog
-        id: urls
-        run: |
-          grep -oP 'Url = "\K[^"]+' src/MeetingRecorder.Core/ModelManagement/ModelCatalog.cs \
-            | sed 's|WhisperBaseUrl + ||' > urls.txt
-          # The whisper entries are written as base + filename; rebuild them.
-          grep -oP 'Url = WhisperBaseUrl \+ "\K[^"]+' src/MeetingRecorder.Core/ModelManagement/ModelCatalog.cs \
-            | sed 's|^|https://huggingface.co/ggerganov/whisper.cpp/resolve/main/|' >> urls.txt
-          sort -u urls.txt | grep '^https://' > resolved.txt
-          cat resolved.txt
-
-      - name: Download and hash
-        run: |
-          set -euo pipefail
-          echo "| file | bytes | sha256 |"
-          echo "| --- | --- | --- |"
-          while read -r url; do
-            name=$(basename "$url")
-            # Large models are streamed straight into sha256sum so the runner
-            # never needs disk space for all of them at once.
-            read -r size hash < <(curl -sSL "$url" | tee >(wc -c > /tmp/size) | sha256sum | cut -d' ' -f1 | { read h; echo "$(cat /tmp/size) $h"; })
-            echo "| $name | $size | $hash |"
-          done < resolved.txt
+      - name: Verify pinned SHA-256 values
+        run: python3 tools/model_checksums.py "${{ inputs.mode || 'verify' }}"
