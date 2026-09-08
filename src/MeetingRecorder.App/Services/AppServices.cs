@@ -131,13 +131,70 @@ public sealed class AppServices : IDisposable
         try
         {
             var threads = Settings.Profile?.SttThreads ?? CapabilityProbe.RecommendThreadCount(Environment.ProcessorCount);
-            var beam = Settings.Profile?.BeamSize ?? 1;
-            return new WhisperSpeechRecognizer(ModelStore.PathFor(descriptor), descriptor.Id, threads, beam, Logger);
+            var options = SpeechRecognitionOptions.Live(threads, Settings.SttLanguage);
+            return new WhisperSpeechRecognizer(ModelStore.PathFor(descriptor), descriptor.Id, options, Logger);
         }
         catch (Exception ex)
         {
             Logger.Error(nameof(AppServices), "Loading the speech model failed.", ex);
             reason = $"音声認識モデルの読み込みに失敗しました（{ex.Message}）。録音のみ実行します。";
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The model the second pass should use, or null when this machine has
+    /// nothing better than the live one.
+    /// </summary>
+    public ModelDescriptor? RefinementModel()
+    {
+        var explicitId = Settings.RefinementModelId ?? Settings.Profile?.RefinementModelId;
+        if (!string.IsNullOrWhiteSpace(explicitId))
+        {
+            return ModelCatalog.Find(explicitId);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Creates the recognizer for the second pass. Separate from
+    /// <see cref="TryCreateRecognizer"/> because it decodes differently: a wider
+    /// beam and whisper's temperature fallback, neither of which the live pass
+    /// can afford.
+    /// </summary>
+    public ISpeechRecognizer? TryCreateRefinementRecognizer(out string? reason)
+    {
+        reason = null;
+
+        var descriptor = RefinementModel();
+        if (descriptor is null)
+        {
+            reason = "このPCの性能では、速報より高精度なモデルを使えません。";
+            return null;
+        }
+
+        if (!ModelStore.IsPresent(descriptor))
+        {
+            reason = $"高精度モデル「{descriptor.DisplayName}」が未取得です。設定画面からダウンロードしてください。";
+            return null;
+        }
+
+        try
+        {
+            // More threads than the live pass: nothing is competing for the CPU
+            // once recording has stopped.
+            var threads = Math.Max(
+                Settings.Profile?.SttThreads ?? 4,
+                CapabilityProbe.RecommendThreadCount(Environment.ProcessorCount));
+
+            var options = SpeechRecognitionOptions.Accurate(threads, Settings.SttLanguage);
+            return new WhisperSpeechRecognizer(ModelStore.PathFor(descriptor), descriptor.Id, options, Logger);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error(nameof(AppServices), "Loading the refinement model failed.", ex);
+            reason = $"高精度モデルの読み込みに失敗しました（{ex.Message}）。";
             return null;
         }
     }

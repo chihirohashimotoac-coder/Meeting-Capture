@@ -59,7 +59,19 @@
                 </StackPanel>
 
                 <TextBlock x:Name="ProfileText" FontSize="11" Foreground="{StaticResource MutedTextBrush}"
-                           Margin="0,0,0,18" />
+                           Margin="0,0,0,12" />
+
+                <CheckBox x:Name="RefineCheck" Margin="0,0,0,4"
+                          Content="録音停止後に、より高精度なモデルで文字起こしをやり直す" />
+                <TextBlock Text="録音中の文字起こしは速報として素早く表示し、停止後に本文を精度優先で作り直します。録音中は1ストリームあたり毎時約115MBの作業用音声を会議フォルダーに保存します。"
+                           TextWrapping="Wrap" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}" Margin="20,0,0,6" />
+
+                <CheckBox x:Name="DeleteRecognitionAudioCheck" Margin="20,0,0,6"
+                          Content="やり直しが終わったら作業用音声を削除する" />
+
+                <TextBlock x:Name="RefinementModelText" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}" Margin="20,0,0,18" />
 
                 <TextBlock Text="実験的機能" Style="{StaticResource SectionHeader}" FontSize="15" />
 
@@ -74,6 +86,17 @@
 
                 <TextBlock Text="動作" Style="{StaticResource SectionHeader}" FontSize="15" />
                 <CheckBox x:Name="SleepCheck" Content="録音中はWindowsのスリープを抑制する" Margin="0,6,0,6" />
+
+                <CheckBox x:Name="AutoSaveRecordingCheck" Margin="0,0,0,4"
+                          Content="録音データを会議フォルダーへ自動保存する" />
+                <TextBlock Text="オフにすると、録音は作業用フォルダーに残したまま会議フォルダーには保存されません。「音声を出力...」で保存先を選んでください。オフでも録音中は常にディスクへ書き込むため、クラッシュしてもデータは残ります。"
+                           TextWrapping="Wrap" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}" Margin="20,0,0,10" />
+
+                <CheckBox x:Name="MicMutedCheck" Margin="0,0,0,4"
+                          Content="既定でマイクをミュートする（PC内部音声のみ録音）" />
+                <CheckBox x:Name="SystemMutedCheck" Margin="0,0,0,10"
+                          Content="既定でPC内部音声をミュートする（マイクのみ録音）" />
 
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,18">
                     <TextBlock Text="自動保存間隔（秒）" VerticalAlignment="Center" Margin="0,0,10,0" />

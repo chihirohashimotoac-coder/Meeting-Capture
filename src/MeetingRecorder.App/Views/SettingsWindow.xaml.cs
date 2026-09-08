@@ -112,6 +112,12 @@ public partial class SettingsWindow : Window
         MinutesCheck.IsChecked = settings.MinutesEnabled;
         SleepCheck.IsChecked = settings.PreventSleepWhileRecording;
         AutoSaveBox.Text = settings.AutoSaveIntervalSeconds.ToString();
+        RefineCheck.IsChecked = settings.RefineTranscriptAfterRecording;
+        DeleteRecognitionAudioCheck.IsChecked = settings.DeleteRecognitionAudioAfterRefinement;
+        AutoSaveRecordingCheck.IsChecked = settings.AutoSaveRecordings;
+        MicMutedCheck.IsChecked = settings.MicrophoneMuted;
+        SystemMutedCheck.IsChecked = settings.SystemAudioMuted;
+        UpdateRefinementModelText();
 
         var mp3 = _services.Transcoder.IsFormatSupported(RecordingFormat.Mp3);
         Mp3AvailabilityText.Text = mp3
@@ -126,6 +132,28 @@ public partial class SettingsWindow : Window
             $"ログ: {AppPaths.LogDirectory}\n" +
             $"AIモデル: {_services.ModelStore.Directory}\n" +
             $"起動モード: {(AppPaths.IsPortable ? "ポータブル（実行ファイルの隣に保存）" : "ユーザープロファイル（%LOCALAPPDATA%）")}";
+    }
+
+    /// <summary>
+    /// Says which model the second pass would actually use, so the checkbox is
+    /// not a promise the machine cannot keep.
+    /// </summary>
+    private void UpdateRefinementModelText()
+    {
+        var descriptor = _services.RefinementModel();
+        if (descriptor is null)
+        {
+            RefinementModelText.Text =
+                "このPCの性能では、速報より高精度なモデルを選べません。"
+                + "「PC性能を測定して自動設定」を実行すると再判定します。";
+            return;
+        }
+
+        var present = _services.ModelStore.IsPresent(descriptor)
+            ? "取得済み"
+            : $"未取得（{descriptor.SizeDisplay} のダウンロードが必要）";
+
+        RefinementModelText.Text = $"やり直しに使うモデル: {descriptor.DisplayName} — {present}";
     }
 
     private void UpdateProfileText()
@@ -269,6 +297,11 @@ public partial class SettingsWindow : Window
         settings.DiarizationEnabled = DiarizationCheck.IsChecked == true;
         settings.MinutesEnabled = MinutesCheck.IsChecked == true;
         settings.PreventSleepWhileRecording = SleepCheck.IsChecked == true;
+        settings.RefineTranscriptAfterRecording = RefineCheck.IsChecked == true;
+        settings.DeleteRecognitionAudioAfterRefinement = DeleteRecognitionAudioCheck.IsChecked == true;
+        settings.AutoSaveRecordings = AutoSaveRecordingCheck.IsChecked == true;
+        settings.MicrophoneMuted = MicMutedCheck.IsChecked == true;
+        settings.SystemAudioMuted = SystemMutedCheck.IsChecked == true;
 
         if (int.TryParse(AutoSaveBox.Text, out var interval))
         {

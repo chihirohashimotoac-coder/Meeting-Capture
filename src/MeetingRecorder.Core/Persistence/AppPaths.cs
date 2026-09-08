@@ -29,6 +29,17 @@ public static class AppPaths
 
     public static string ModelDirectory => Path.Combine(DataRoot, "models");
 
+    /// <summary>
+    /// Where recordings go while automatic saving is switched off.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately still a folder on disk. "Do not save automatically" means the
+    /// user decides where the file ends up, not that an hour of a meeting is
+    /// risked on staying in memory - a crash there loses everything, which is the
+    /// failure the recovery journal exists to prevent.
+    /// </remarks>
+    public static string WorkingRecordingRoot => Path.Combine(DataRoot, "unsaved");
+
     /// <summary>Default meeting output folder, used until the user picks one.</summary>
     public static string DefaultSaveRoot()
     {
