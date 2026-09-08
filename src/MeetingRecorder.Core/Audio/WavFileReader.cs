@@ -112,6 +112,57 @@ public sealed class WavFileReader : IDisposable
         _stream.Seek(_dataStart, SeekOrigin.Begin);
     }
 
+    /// <summary>
+    /// Reads the next block of frames, down-mixed to mono. Returns how many
+    /// frames were written; 0 at the end of the data chunk.
+    /// </summary>
+    /// <remarks>
+    /// Sequential rather than whole-file because an hour of 16 kHz mono is
+    /// 230 MB as floats, and the second transcription pass walks a whole meeting.
+    /// </remarks>
+    public int ReadMono(Span<float> destination)
+    {
+        if (destination.IsEmpty)
+        {
+            return 0;
+        }
+
+        var bytesPerSample = BitsPerSample / 8;
+        var frameBytes = bytesPerSample * Channels;
+        var dataEnd = _dataStart + (long)_dataBytes;
+        var position = _stream.Position;
+
+        if (position < _dataStart)
+        {
+            _stream.Seek(_dataStart, SeekOrigin.Begin);
+            position = _dataStart;
+        }
+
+        var remainingFrames = (dataEnd - position) / frameBytes;
+        if (remainingFrames <= 0)
+        {
+            return 0;
+        }
+
+        var wanted = (int)Math.Min(destination.Length, remainingFrames);
+        var raw = new byte[wanted * frameBytes];
+        var read = _stream.Read(raw, 0, raw.Length);
+        var frames = read / frameBytes;
+
+        for (var f = 0; f < frames; f++)
+        {
+            double sum = 0;
+            for (var c = 0; c < Channels; c++)
+            {
+                sum += ReadSample(raw, ((f * Channels) + c) * bytesPerSample);
+            }
+
+            destination[f] = (float)(sum / Channels);
+        }
+
+        return frames;
+    }
+
     /// <summary>Reads the whole file, down-mixed to mono float in [-1, 1].</summary>
     public float[] ReadAllMono()
     {

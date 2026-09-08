@@ -78,6 +78,27 @@ public sealed class AppSettings
     /// <summary>Result of the last hardware benchmark; re-used until hardware changes.</summary>
     public PerformanceProfile? Profile { get; set; }
 
+    /// <summary>
+    /// After recording stops, transcribe the meeting again with the accurate
+    /// model and replace the live transcript.
+    /// </summary>
+    /// <remarks>
+    /// The live transcript is tuned for latency and the second pass for accuracy;
+    /// this is what lets both be true. It needs the per-stream recognition audio,
+    /// about 115 MB per hour per stream, kept in the meeting folder while the
+    /// recording is in progress.
+    /// </remarks>
+    public bool RefineTranscriptAfterRecording { get; set; } = true;
+
+    /// <summary>
+    /// Catalog id of the model used by the second pass, or null to use the
+    /// largest model the machine can hold.
+    /// </summary>
+    public string? RefinementModelId { get; set; }
+
+    /// <summary>Delete the per-stream recognition audio once the second pass has finished.</summary>
+    public bool DeleteRecognitionAudioAfterRefinement { get; set; } = true;
+
     // ---- Optional / experimental ----------------------------------------
 
     public bool DiarizationEnabled { get; set; } = true;

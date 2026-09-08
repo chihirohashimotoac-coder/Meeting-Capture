@@ -97,7 +97,7 @@ public class RealModelRecognitionTests
         var audio = LoadAudioAt16k();
         var audioSeconds = audio.Length / (double)SpeechConstants.SampleRate;
 
-        using var recognizer = new WhisperSpeechRecognizer(ModelPath!, "test-model", threads: 2);
+        using var recognizer = new WhisperSpeechRecognizer(ModelPath!, "test-model", SpeechRecognitionOptions.Live(2, Language));
         Assert.True(recognizer.IsReady);
 
         var stopwatch = Stopwatch.StartNew();
@@ -180,7 +180,7 @@ public class RealModelRecognitionTests
                 }
             };
 
-            scheduler.Start(new WhisperSpeechRecognizer(ModelPath!, "test-model", threads: 2));
+            scheduler.Start(new WhisperSpeechRecognizer(ModelPath!, "test-model", SpeechRecognitionOptions.Live(2, Language)));
             foreach (var chunk in chunks)
             {
                 scheduler.Enqueue(chunk);

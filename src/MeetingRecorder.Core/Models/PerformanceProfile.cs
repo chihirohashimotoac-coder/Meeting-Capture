@@ -27,6 +27,18 @@ public sealed class PerformanceProfile
     /// <summary>Greedy decoding (beam size 1) is ~2x faster and adequate for meetings.</summary>
     public int BeamSize { get; set; } = 1;
 
+    /// <summary>
+    /// Silence that ends a live chunk. Shorter means a sentence reaches the
+    /// screen sooner; too short cuts a speaker off mid-thought.
+    /// </summary>
+    public int SilenceFlushMs { get; set; } = 700;
+
+    /// <summary>
+    /// Catalog id of the model for the second, accurate pass. Null when the
+    /// machine cannot hold anything better than the live model.
+    /// </summary>
+    public string? RefinementModelId { get; set; }
+
     public bool DiarizationEnabled { get; set; } = true;
 
     public bool MinutesEnabled { get; set; } = true;

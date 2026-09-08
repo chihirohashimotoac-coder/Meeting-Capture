@@ -88,14 +88,41 @@ public static class ProfileSelector
         var minutes = capability.TotalRamGb >= 8.0;
         reasons.Append(minutes ? " ローカル議事録生成を有効化。" : " RAM不足のためローカル議事録生成は無効。");
 
+        // The live pass is judged on how quickly a sentence appears, and a chunk
+        // cannot be transcribed before it has been closed. Six to ten seconds of
+        // audio plus inference put the first words on screen around ten seconds
+        // after they were spoken, which reads as broken. The second pass is what
+        // makes short windows affordable: accuracy is recovered afterwards, so
+        // the live pass can be tuned for latency alone.
+        var refinement = SelectRefinementModel(capability, chosen);
+        var chunkSeconds = refinement is null
+            ? (estimatedRtf > 0.4 ? 6.0 : 10.0)
+            : 4.0;
+
+        if (refinement is not null)
+        {
+            reasons.Append(CultureInfo.InvariantCulture,
+                $" 停止後の高精度パスに「{refinement.DisplayName}」を使用（速報は遅延優先の設定）。");
+        }
+        else
+        {
+            reasons.Append(" 高精度パス用の上位モデルを保持できないため、速報のみです。");
+        }
+
         return new PerformanceProfile
         {
             SttModelId = chosen.Id,
             SttThreads = threads,
-            ChunkSeconds = estimatedRtf > 0.4 ? 6.0 : 10.0,
+            ChunkSeconds = chunkSeconds,
             ChunkOverlapMs = 400,
+
+            // 450 ms is around the length of a natural pause between clauses. It
+            // ends a chunk a quarter-second sooner than the old 700 ms without
+            // cutting into the gap a speaker leaves mid-sentence.
+            SilenceFlushMs = refinement is null ? 700 : 450,
             VadEnabled = true,
             BeamSize = 1,
+            RefinementModelId = refinement?.Id,
             DiarizationEnabled = diarization,
             MinutesEnabled = minutes,
             LogicalCores = capability.LogicalCores,
@@ -103,6 +130,31 @@ public static class ProfileSelector
             CpuScore = capability.MultiThreadScore,
             Rationale = reasons.ToString(),
         };
+    }
+
+    /// <summary>
+    /// Picks the model for the second pass: the largest one the machine can hold,
+    /// and strictly better than the live model or there is no point running it.
+    /// </summary>
+    /// <remarks>
+    /// Speed is deliberately not a criterion. This pass runs after recording has
+    /// stopped, so it competes with nothing; what it costs is the user's patience
+    /// once, and what it buys is a transcript that is worth reading.
+    /// </remarks>
+    public static ModelDescriptor? SelectRefinementModel(MachineCapability capability, ModelDescriptor liveModel)
+    {
+        var liveIndex = Array.IndexOf(LadderIds, liveModel.Id);
+
+        for (var i = LadderIds.Length - 1; i > liveIndex; i--)
+        {
+            var candidate = ModelCatalog.RequireSpeechModel(LadderIds[i]);
+            if (capability.TotalRamGb * 1024 >= candidate.RequiredRamMb * 3.0)
+            {
+                return candidate;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

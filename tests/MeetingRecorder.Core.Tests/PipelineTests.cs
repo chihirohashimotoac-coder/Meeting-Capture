@@ -230,6 +230,65 @@ public sealed class PipelineTests : IDisposable
     }
 
     [Fact]
+    public void KeepsPerStreamRecognitionAudioWhenTheSecondPassWillWantIt()
+    {
+        var factory = new FakeCaptureFactory(
+            SignalGenerator.Sine(220, 1.0, 48000, 0.35),
+            SignalGenerator.Sine(660, 1.0, 48000, 0.35));
+
+        using var pipeline = new RecordingPipeline(
+            new RecordingPipelineOptions { Profile = new PerformanceProfile { ChunkSeconds = 1.0 } },
+            factory,
+            new TranscriptStore());
+
+        var recognitionDirectory = Path.Combine(_root, "recognition");
+        var path = Path.Combine(_root, "with-recognition-audio.wav");
+
+        pipeline.Start(
+            path,
+            CreateSettings(),
+            new FakeSpeechRecognizer(),
+            null,
+            Path.Combine(_root, "spill"),
+            diarizer: null,
+            recognitionAudioDirectory: recognitionDirectory);
+
+        Thread.Sleep(2000);
+        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(recognitionDirectory, result.RecognitionAudioDirectory);
+        Assert.True(RecognitionAudioNames.ExistIn(recognitionDirectory));
+
+        // Written at the engine's rate, not the capture rate: this is the audio
+        // the recognizer saw, so the second pass reads exactly what the first did.
+        using var micAudio = new WavFileReader(Path.Combine(recognitionDirectory, RecognitionAudioNames.Microphone));
+        Assert.Equal(SpeechConstants.SampleRate, micAudio.SampleRate);
+        Assert.InRange(micAudio.DurationSeconds, 1.5, 3.0);
+        Assert.True(AudioMath.Rms(micAudio.ReadAllMono()) > 0.05, "the microphone stream should be in its own file");
+    }
+
+    [Fact]
+    public void KeepsNoRecognitionAudioWhenTheSecondPassIsOff()
+    {
+        var factory = new FakeCaptureFactory();
+        using var pipeline = new RecordingPipeline(
+            new RecordingPipelineOptions { Profile = new PerformanceProfile { ChunkSeconds = 1.0 } },
+            factory,
+            new TranscriptStore());
+
+        var path = Path.Combine(_root, "no-recognition-audio.wav");
+        pipeline.Start(path, CreateSettings(), new FakeSpeechRecognizer(), null, Path.Combine(_root, "spill"));
+
+        Thread.Sleep(1200);
+        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+
+        // 115 MB per hour per stream is not something to spend without being
+        // asked: no directory, no copies.
+        Assert.Null(result.RecognitionAudioDirectory);
+        Assert.False(RecognitionAudioNames.ExistIn(_root));
+    }
+
+    [Fact]
     public void RecordingContinuesWithOnlyOneStreamWhenTheOtherDeviceIsUnavailable()
     {
         var factory = new FakeCaptureFactory(failSystem: true);
