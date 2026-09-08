@@ -74,6 +74,39 @@ public sealed class TranscriptStore
         }
     }
 
+    /// <summary>
+    /// Swaps the whole transcript for a new one. Used by the second
+    /// transcription pass, which produces its own segmentation rather than
+    /// editing the live one.
+    /// </summary>
+    /// <remarks>
+    /// Raised as removals followed by additions so any view bound to the events
+    /// ends up consistent without needing to know this operation exists. Speaker
+    /// names survive, because a person may have typed them.
+    /// </remarks>
+    public void ReplaceAll(IEnumerable<TranscriptSegment> segments)
+    {
+        ArgumentNullException.ThrowIfNull(segments);
+        var replacement = segments.OrderBy(s => s.StartMs).ToList();
+
+        TranscriptSegment[] removed;
+        lock (_sync)
+        {
+            removed = _segments.ToArray();
+            _segments.Clear();
+        }
+
+        foreach (var segment in removed)
+        {
+            SegmentRemoved?.Invoke(segment);
+        }
+
+        foreach (var segment in replacement)
+        {
+            Add(segment);
+        }
+    }
+
     /// <summary>Applies a user edit to the text of a segment.</summary>
     public bool EditText(string id, string text)
     {

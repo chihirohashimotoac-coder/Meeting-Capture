@@ -87,7 +87,11 @@
                                          BorderThickness="0" />
                         </Grid>
                         <TextBlock Text="{Binding MicLevelText}" FontSize="11"
-                                   Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,12" />
+                                   Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,4" />
+                        <CheckBox Content="マイクをミュート（PC内部音声のみ録音）"
+                                  IsChecked="{Binding MicrophoneMuted}"
+                                  ToolTip="録音中でも切り替えられます。ミュート中の音声はファイルにも文字起こしにも入りません。"
+                                  Margin="0,0,0,12" />
 
                         <TextBlock Text="PC内部音声 (WASAPIループバック)" Style="{StaticResource SectionHeader}" />
                         <Grid Height="16" Margin="0,0,0,2">
@@ -99,7 +103,28 @@
                                          BorderThickness="0" />
                         </Grid>
                         <TextBlock Text="{Binding SystemLevelText}" FontSize="11"
-                                   Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,16" />
+                                   Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,4" />
+                        <CheckBox Content="PC内部音声をミュート（マイクのみ録音）"
+                                  IsChecked="{Binding SystemAudioMuted}"
+                                  ToolTip="録音中でも切り替えられます。ミュート中の音声はファイルにも文字起こしにも入りません。"
+                                  Margin="0,0,0,6" />
+
+                        <TextBlock Text="{Binding MuteWarningText}"
+                                   TextWrapping="Wrap"
+                                   FontSize="11"
+                                   Foreground="{StaticResource WarningBorderBrush}"
+                                   Margin="0,0,0,16">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding HasMuteWarning}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
 
                         <TextBlock Text="文字起こし" Style="{StaticResource SectionHeader}" />
                         <TextBlock Text="{Binding SttLatencyText}" Margin="0,0,0,4" />
@@ -109,6 +134,9 @@
                         <TextBlock Text="保存先" Style="{StaticResource SectionHeader}" />
                         <TextBlock Text="{Binding SaveRootText}" Margin="0,0,0,8" TextTrimming="CharacterEllipsis" />
                         <Button Content="保存先を開く" Command="{Binding OpenFolderCommand}"
+                                HorizontalAlignment="Left" Margin="0,0,0,6" />
+                        <Button Content="音声を出力..." Command="{Binding ExportAudioCommand}"
+                                ToolTip="直前の録音を、任意の場所にコピーします。"
                                 HorizontalAlignment="Left" Margin="0,0,0,16" />
 
                         <TextBlock Text="診断情報" Style="{StaticResource SectionHeader}" />
@@ -156,10 +184,41 @@
                     </ListBox.ItemTemplate>
                 </ListBox>
 
-                <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
-                    <Button Content="文字起こしを保存" Command="{Binding SaveTranscriptCommand}" />
-                    <Button Content="話者名を編集" Command="{Binding RenameSpeakerCommand}" />
-                    <Button Content="議事録を生成（実験的）" Command="{Binding GenerateMinutesCommand}" MinWidth="180" />
+                <StackPanel Grid.Row="2" Margin="0,10,0,0">
+                    <Grid Margin="0,0,0,6">
+                        <Grid.Style>
+                            <Style TargetType="Grid">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsRefining}" Value="True">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Grid.Style>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="{Binding RefinementStatus}" FontSize="11"
+                                       Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,2" />
+                            <ProgressBar Minimum="0" Maximum="1" Height="6"
+                                         Value="{Binding RefinementProgress, Mode=OneWay}" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="中止" Command="{Binding CancelRefinementCommand}"
+                                Margin="10,0,0,0" VerticalAlignment="Bottom" />
+                    </Grid>
+
+                    <StackPanel Orientation="Horizontal">
+                        <Button Content="文字起こしを保存" Command="{Binding SaveTranscriptCommand}" />
+                        <Button Content="話者名を編集" Command="{Binding RenameSpeakerCommand}" />
+                        <Button Content="高精度で文字起こしをやり直す"
+                                Command="{Binding RefineTranscriptCommand}"
+                                ToolTip="録音済みの音声を、より大きなモデルで最初から文字起こしし直します。録音中は実行できません。"
+                                MinWidth="210" />
+                        <Button Content="議事録を生成（実験的）" Command="{Binding GenerateMinutesCommand}" MinWidth="180" />
+                    </StackPanel>
                 </StackPanel>
             </Grid>
         </Grid>

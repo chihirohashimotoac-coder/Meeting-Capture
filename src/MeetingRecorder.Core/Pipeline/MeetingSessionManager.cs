@@ -61,6 +61,40 @@ public sealed class MeetingSessionManager : IDisposable
 
     public RecordingStatus GetStatus() => _pipeline?.GetStatus() ?? default;
 
+    /// <summary>
+    /// Silences the microphone leg. Settable before or during a recording; the
+    /// value set here is what the next recording starts with.
+    /// </summary>
+    public bool MicrophoneMuted
+    {
+        get => _pipeline?.MicrophoneMuted ?? _pendingMicrophoneMuted;
+        set
+        {
+            _pendingMicrophoneMuted = value;
+            if (_pipeline is not null)
+            {
+                _pipeline.MicrophoneMuted = value;
+            }
+        }
+    }
+
+    /// <summary>Silences the PC-audio leg.</summary>
+    public bool SystemAudioMuted
+    {
+        get => _pipeline?.SystemAudioMuted ?? _pendingSystemAudioMuted;
+        set
+        {
+            _pendingSystemAudioMuted = value;
+            if (_pipeline is not null)
+            {
+                _pipeline.SystemAudioMuted = value;
+            }
+        }
+    }
+
+    private bool _pendingMicrophoneMuted;
+    private bool _pendingSystemAudioMuted;
+
     /// <summary>Creates the meeting folder and starts capture.</summary>
     public MeetingFolder Start(
         AppSettings settings,
@@ -123,7 +157,19 @@ public sealed class MeetingSessionManager : IDisposable
         _pipeline.StatusChanged += status => StatusChanged?.Invoke(status);
 
         var spill = Path.Combine(_folder.Path, ".stt-spill");
-        _pipeline.Start(_folder.WavPath, settings, recognizer, _journal, spill, diarizer);
+
+        // The second pass reads per-stream audio, so it has to be captured while
+        // the meeting runs - there is no way to recover it afterwards from a
+        // mixed file. Only kept when the pass is actually going to run.
+        var recognitionAudio = settings.SttEnabled && settings.RefineTranscriptAfterRecording
+            ? _folder.Path
+            : null;
+
+        _pipeline.Start(_folder.WavPath, settings, recognizer, _journal, spill, diarizer, recognitionAudio);
+
+        // A toggle flipped while idle applies to the recording that just started.
+        _pipeline.MicrophoneMuted = _pendingMicrophoneMuted || settings.MicrophoneMuted;
+        _pipeline.SystemAudioMuted = _pendingSystemAudioMuted || settings.SystemAudioMuted;
 
         _logger.Info(nameof(MeetingSessionManager), $"Meeting '{_folder.Name}' started.");
         return _folder;
@@ -178,7 +224,8 @@ public sealed class MeetingSessionManager : IDisposable
         _pipeline.Dispose();
         _pipeline = null;
 
-        var summary = new MeetingSummary(_folder, _metadata, segments, audioPath, warnings);
+        var summary = new MeetingSummary(
+            _folder, _metadata, segments, audioPath, warnings, result.RecognitionAudioDirectory);
         _logger.Info(
             nameof(MeetingSessionManager),
             $"Meeting '{_folder.Name}' finished: {result.Duration:hh\\:mm\\:ss}, {segments.Count} segments, {warnings.Count} warnings.");
@@ -278,9 +325,14 @@ public sealed class MeetingSessionManager : IDisposable
 /// <param name="Segments">Transcript at the moment recording stopped.</param>
 /// <param name="AudioPath">The delivered audio file (WAV or MP3).</param>
 /// <param name="Warnings">Anything the user should know about this recording.</param>
+/// <param name="RecognitionAudioDirectory">
+/// Where the per-stream recognition audio was kept, when the second
+/// transcription pass is going to be offered. Null when it was not captured.
+/// </param>
 public sealed record MeetingSummary(
     MeetingFolder Folder,
     MeetingMetadata Metadata,
     IReadOnlyList<Models.TranscriptSegment> Segments,
     string AudioPath,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    string? RecognitionAudioDirectory = null);

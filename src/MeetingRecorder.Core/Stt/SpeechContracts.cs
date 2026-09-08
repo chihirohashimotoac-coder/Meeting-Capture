@@ -54,8 +54,58 @@ public interface ISpeechRecognizer : IDisposable
     IReadOnlyList<RecognizedSpan> Transcribe(ReadOnlySpan<float> samples, string language, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// How a recognizer should decode. The two passes want opposite things, so the
+/// choice is explicit rather than hidden in the engine.
+/// </summary>
+/// <param name="Threads">Worker threads handed to whisper.cpp.</param>
+/// <param name="BeamSize">1 for greedy decoding; higher searches wider and costs proportionally more.</param>
+/// <param name="InitialPrompt">
+/// Text prepended as decoder context. A short Japanese sentence is what makes
+/// whisper punctuate Japanese properly instead of emitting one unbroken run of
+/// kana; it is style guidance, never content, and never appears in the output.
+/// </param>
+/// <param name="TemperatureIncrement">
+/// Whisper's fallback: when a decode looks degenerate it retries at a higher
+/// temperature. 0 disables the retries and is roughly twice as fast in the worst
+/// case; 0.2 is whisper's own default and recovers passages the first attempt
+/// mangles.
+/// </param>
+public readonly record struct SpeechRecognitionOptions(
+    int Threads,
+    int BeamSize = 1,
+    string? InitialPrompt = null,
+    float TemperatureIncrement = 0.0f)
+{
+    /// <summary>
+    /// Japanese meeting speech, punctuated. Without a prompt whisper frequently
+    /// returns Japanese with no punctuation at all, which is markedly harder to
+    /// read back as a meeting record.
+    /// </summary>
+    public const string JapaneseMeetingPrompt = "以下は会議の日本語の音声です。句読点を付けて書き起こします。";
+
+    /// <summary>Decoding for the live pass: as fast as possible, shown while the meeting runs.</summary>
+    public static SpeechRecognitionOptions Live(int threads, string language) => new(
+        threads,
+        BeamSize: 1,
+        InitialPrompt: PromptFor(language),
+        TemperatureIncrement: 0.0f);
+
+    /// <summary>Decoding for the second pass: accuracy, run after recording stops.</summary>
+    public static SpeechRecognitionOptions Accurate(int threads, string language) => new(
+        threads,
+        BeamSize: 5,
+        InitialPrompt: PromptFor(language),
+        TemperatureIncrement: 0.2f);
+
+    private static string? PromptFor(string language)
+        => string.IsNullOrWhiteSpace(language) || language.StartsWith("ja", StringComparison.OrdinalIgnoreCase)
+            ? JapaneseMeetingPrompt
+            : null;
+}
+
 /// <summary>Creates a recognizer once a model file is present on disk.</summary>
 public interface ISpeechRecognizerFactory
 {
-    ISpeechRecognizer Create(string modelPath, int threads, int beamSize);
+    ISpeechRecognizer Create(string modelPath, SpeechRecognitionOptions options);
 }

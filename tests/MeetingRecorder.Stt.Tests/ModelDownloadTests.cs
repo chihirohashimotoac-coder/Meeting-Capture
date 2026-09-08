@@ -1,3 +1,4 @@
+using MeetingRecorder.Core.Stt;
 using System.Net;
 using System.Security.Cryptography;
 using MeetingRecorder.Core.ModelManagement;
@@ -223,7 +224,7 @@ public class SpeechRecognizerContractTests
         var missing = Path.Combine(Path.GetTempPath(), "no-such-model-" + Guid.NewGuid().ToString("N") + ".bin");
 
         var exception = Assert.Throws<FileNotFoundException>(
-            () => new WhisperSpeechRecognizer(missing, "test", threads: 2));
+            () => new WhisperSpeechRecognizer(missing, "test", SpeechRecognitionOptions.Live(2, "ja")));
 
         Assert.Contains("モデル", exception.Message);
     }
@@ -234,6 +235,6 @@ public class SpeechRecognizerContractTests
         var factory = new WhisperSpeechRecognizerFactory();
         var missing = Path.Combine(Path.GetTempPath(), "absent-" + Guid.NewGuid().ToString("N") + ".bin");
 
-        Assert.Throws<FileNotFoundException>(() => factory.Create(missing, 2, 1));
+        Assert.Throws<FileNotFoundException>(() => factory.Create(missing, SpeechRecognitionOptions.Live(2, "ja")));
     }
 }

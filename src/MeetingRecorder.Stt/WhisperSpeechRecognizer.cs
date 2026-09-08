@@ -46,14 +46,13 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
     private readonly object _sync = new();
     private readonly WhisperFactory _factory;
     private readonly ILogger _logger;
-    private readonly int _threads;
-    private readonly int _beamSize;
+    private readonly SpeechRecognitionOptions _options;
 
     private WhisperProcessor? _processor;
     private string? _processorLanguage;
     private bool _disposed;
 
-    public WhisperSpeechRecognizer(string modelPath, string modelId, int threads, int beamSize = 1, ILogger? logger = null)
+    public WhisperSpeechRecognizer(string modelPath, string modelId, SpeechRecognitionOptions options, ILogger? logger = null)
     {
         if (!File.Exists(modelPath))
         {
@@ -61,14 +60,16 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
         }
 
         _logger = logger ?? NullLogger.Instance;
-        _threads = Math.Max(1, threads);
-        _beamSize = Math.Max(1, beamSize);
+        _options = options with { Threads = Math.Max(1, options.Threads), BeamSize = Math.Max(1, options.BeamSize) };
         ModelId = modelId;
         ModelPath = modelPath;
 
         _factory = WhisperFactory.FromPath(modelPath);
         IsReady = true;
-        _logger.Info(nameof(WhisperSpeechRecognizer), $"Loaded '{modelId}' from '{modelPath}' (threads={_threads}, beam={_beamSize}).");
+        _logger.Info(
+            nameof(WhisperSpeechRecognizer),
+            $"Loaded '{modelId}' from '{modelPath}' (threads={_options.Threads}, beam={_options.BeamSize}, "
+            + $"temperatureInc={_options.TemperatureIncrement:F2}, prompt={(_options.InitialPrompt is null ? "none" : "set")}).");
     }
 
     public string ModelId { get; }
@@ -158,7 +159,7 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
 
         var builder = _factory.CreateBuilder()
             .WithLanguage(string.IsNullOrWhiteSpace(language) ? "ja" : language)
-            .WithThreads(_threads)
+            .WithThreads(_options.Threads)
             // Chunks from two independent streams share this engine; carrying
             // decoder context between them fabricates plausible-sounding text.
             .WithNoContext()
@@ -168,17 +169,30 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
             .WithoutStringPool()
             .WithSegmentEventHandler(segment => _segmentHandler?.Invoke(segment));
 
-        if (_beamSize > 1)
+        // A short prompt is not context from another speaker - it is style
+        // guidance, and it is what makes Japanese come back punctuated rather
+        // than as one unbroken run of kana.
+        if (!string.IsNullOrWhiteSpace(_options.InitialPrompt))
+        {
+            builder = builder.WithPrompt(_options.InitialPrompt);
+        }
+
+        if (_options.TemperatureIncrement > 0f)
+        {
+            builder = builder.WithTemperatureInc(_options.TemperatureIncrement);
+        }
+
+        if (_options.BeamSize > 1)
         {
             builder = ((BeamSearchSamplingStrategyBuilder)builder.WithBeamSearchSamplingStrategy())
-                .WithBeamSize(_beamSize)
+                .WithBeamSize(_options.BeamSize)
                 .ParentBuilder;
         }
         else
         {
-            // Greedy decoding is roughly twice as fast as a beam search and the
-            // difference is marginal for meeting speech; the profile selector
-            // only raises the beam size on machines with measured head-room.
+            // Greedy decoding is roughly twice as fast as a beam search. The live
+            // pass takes that trade because latency is what it is judged on; the
+            // second pass does not.
             builder = builder.WithGreedySamplingStrategy().ParentBuilder;
         }
 
@@ -216,6 +230,6 @@ public sealed class WhisperSpeechRecognizerFactory : ISpeechRecognizerFactory
         _logger = logger ?? NullLogger.Instance;
     }
 
-    public ISpeechRecognizer Create(string modelPath, int threads, int beamSize)
-        => new WhisperSpeechRecognizer(modelPath, Path.GetFileNameWithoutExtension(modelPath), threads, beamSize, _logger);
+    public ISpeechRecognizer Create(string modelPath, SpeechRecognitionOptions options)
+        => new WhisperSpeechRecognizer(modelPath, Path.GetFileNameWithoutExtension(modelPath), options, _logger);
 }

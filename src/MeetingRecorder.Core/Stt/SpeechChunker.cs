@@ -137,8 +137,18 @@ public sealed class SpeechChunker
     {
         if (_frameBuffer.Count > 0)
         {
-            _pending.AddRange(_frameBuffer);
             _consumedSamples += _frameBuffer.Count;
+
+            // Only when an utterance is actually in progress. The frame buffer
+            // holds less than one 20 ms VAD frame, so on its own it is a scrap of
+            // audio nobody was speaking into: promoting it to a chunk spends a
+            // recognition on silence and appends a stray segment to the
+            // transcript - visible when a muted stream still produced one.
+            if (_pending.Count > 0)
+            {
+                _pending.AddRange(_frameBuffer);
+            }
+
             _frameBuffer.Clear();
         }
 

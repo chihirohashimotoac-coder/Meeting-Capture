@@ -88,6 +88,22 @@ public sealed class RecordingPipeline : IDisposable
     private SpeechChunker? _micChunker;
     private SpeechChunker? _systemChunker;
 
+    // Recognition is fed from before the listening chain, so it needs its own
+    // DC blockers and its own copy of each block. See ProcessBlock.
+    private DcBlocker? _micRecognitionFilter;
+    private DcBlocker? _systemRecognitionFilter;
+    private float[] _micRecognitionBuffer = Array.Empty<float>();
+    private float[] _systemRecognitionBuffer = Array.Empty<float>();
+
+    private volatile bool _microphoneMuted;
+    private volatile bool _systemAudioMuted;
+
+    // Per-stream copies of the recognition audio, kept only when the second
+    // transcription pass is going to want them. See StartRecognitionCapture.
+    private IAudioFileWriter? _micRecognitionWriter;
+    private IAudioFileWriter? _systemRecognitionWriter;
+    private string? _recognitionAudioDirectory;
+
     private IAudioCaptureSource? _micSource;
     private IAudioCaptureSource? _systemSource;
     private IAudioFileWriter? _writer;
@@ -122,6 +138,58 @@ public sealed class RecordingPipeline : IDisposable
 
     public TranscriptStore Transcript { get; }
 
+    /// <summary>
+    /// Silences the microphone leg without stopping it. Can be changed while
+    /// recording.
+    /// </summary>
+    /// <remarks>
+    /// Muting zeroes the audio in the pump rather than closing the endpoint. The
+    /// stream therefore keeps flowing, the timeline keeps advancing at wall-clock
+    /// rate, and un-muting takes effect on the very next block instead of paying
+    /// for a device restart. Nothing muted reaches the file, the meters or the
+    /// transcript.
+    /// </remarks>
+    public bool MicrophoneMuted
+    {
+        get => _microphoneMuted;
+        set
+        {
+            if (_microphoneMuted == value)
+            {
+                return;
+            }
+
+            _microphoneMuted = value;
+            if (value)
+            {
+                _micMeter.Reset();
+            }
+
+            _logger.Info(nameof(RecordingPipeline), value ? "Microphone muted." : "Microphone un-muted.");
+        }
+    }
+
+    /// <summary>Silences the PC-audio leg without stopping it.</summary>
+    public bool SystemAudioMuted
+    {
+        get => _systemAudioMuted;
+        set
+        {
+            if (_systemAudioMuted == value)
+            {
+                return;
+            }
+
+            _systemAudioMuted = value;
+            if (value)
+            {
+                _systemMeter.Reset();
+            }
+
+            _logger.Info(nameof(RecordingPipeline), value ? "PC audio muted." : "PC audio un-muted.");
+        }
+    }
+
     public RecordingState State => _state;
 
     public string? AudioFilePath => _writer?.FilePath;
@@ -150,13 +218,20 @@ public sealed class RecordingPipeline : IDisposable
     /// Starts capture. <paramref name="recognizer"/> may be null - the meeting is
     /// then recorded without a transcript rather than not recorded at all.
     /// </summary>
+    /// <param name="recognitionAudioDirectory">
+    /// When set, each capture stream's recognition audio is also written here as
+    /// 16 kHz mono WAV, so <see cref="Stt.TranscriptionRefiner"/> can re-transcribe
+    /// the meeting afterwards with per-stream attribution intact. Costs about
+    /// 115 MB per hour per stream; null disables it.
+    /// </param>
     public void Start(
         string audioFilePath,
         AppSettings settings,
         ISpeechRecognizer? recognizer,
         RecoveryJournal? journal,
         string spillDirectory,
-        ISpeakerDiarizer? diarizer = null)
+        ISpeakerDiarizer? diarizer = null,
+        string? recognitionAudioDirectory = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -184,8 +259,21 @@ public sealed class RecordingPipeline : IDisposable
         _mixer = new StreamMixer(_options.Processing, rate);
         _micToStt = new Resampler(rate, SpeechConstants.SampleRate);
         _systemToStt = new Resampler(rate, SpeechConstants.SampleRate);
-        _micChunker = new SpeechChunker(AudioSourceKind.Microphone, _options.Profile.ChunkSeconds, overlapMs: _options.Profile.ChunkOverlapMs);
-        _systemChunker = new SpeechChunker(AudioSourceKind.SystemAudio, _options.Profile.ChunkSeconds, overlapMs: _options.Profile.ChunkOverlapMs);
+        _micRecognitionFilter = new DcBlocker(rate);
+        _systemRecognitionFilter = new DcBlocker(rate);
+        StartRecognitionCapture(recognitionAudioDirectory);
+        _microphoneMuted = settings.MicrophoneMuted;
+        _systemAudioMuted = settings.SystemAudioMuted;
+        _micChunker = new SpeechChunker(
+            AudioSourceKind.Microphone,
+            _options.Profile.ChunkSeconds,
+            silenceFlushMs: _options.Profile.SilenceFlushMs,
+            overlapMs: _options.Profile.ChunkOverlapMs);
+        _systemChunker = new SpeechChunker(
+            AudioSourceKind.SystemAudio,
+            _options.Profile.ChunkSeconds,
+            silenceFlushMs: _options.Profile.SilenceFlushMs,
+            overlapMs: _options.Profile.ChunkOverlapMs);
 
         _micMeter.Reset();
         _systemMeter.Reset();
@@ -327,6 +415,7 @@ public sealed class RecordingPipeline : IDisposable
     /// <summary>Unwinds a start that could not produce a single working stream.</summary>
     private void AbortStart()
     {
+        StopRecognitionCapture();
         _cts?.Cancel();
         _pump?.Join(TimeSpan.FromSeconds(2));
 
@@ -382,13 +471,25 @@ public sealed class RecordingPipeline : IDisposable
 
     private void OnMicData(ReadOnlySpan<float> samples)
     {
-        _micMeter.Update(samples);
+        // While muted the meter must read silence: a moving bar next to a muted
+        // stream tells the user their voice is being recorded when it is not.
+        // The samples still enter the ring so the drift compensator keeps seeing
+        // a healthy stream; the pump is where they are actually discarded.
+        if (!_microphoneMuted)
+        {
+            _micMeter.Update(samples);
+        }
+
         _micRing?.Write(samples);
     }
 
     private void OnSystemData(ReadOnlySpan<float> samples)
     {
-        _systemMeter.Update(samples);
+        if (!_systemAudioMuted)
+        {
+            _systemMeter.Update(samples);
+        }
+
         _systemRing?.Write(samples);
     }
 
@@ -458,6 +559,37 @@ public sealed class RecordingPipeline : IDisposable
         FillStream(_micRing, mic, _micDrift!, tickSeconds, ref _micSilenceSeconds, rate);
         FillStream(_systemRing, system, _systemDrift!, tickSeconds, ref _systemSilenceSeconds, rate);
 
+        // Muting happens here, before anything reads the audio, so a muted leg
+        // reaches neither the file nor the transcript - while the block itself is
+        // still produced, keeping the timeline on the wall clock.
+        if (_microphoneMuted)
+        {
+            mic.Clear();
+        }
+
+        if (_systemAudioMuted)
+        {
+            system.Clear();
+        }
+
+        // Recognition is fed from HERE, before the listening chain, and the two
+        // paths diverge for a reason. The gate, the loudness normalizer, the
+        // compressor and the limiter exist to make a recording pleasant for a
+        // human ear: they attenuate quiet passages and reshape level non-linearly.
+        // Whisper's features are computed from exactly that shape, so running
+        // speech through them first is a measurable accuracy loss - worst on the
+        // quiet, conversational speech this product is for. Recognition gets the
+        // captured audio with only DC offset removed; the file still gets the
+        // full chain.
+        var micForRecognition = ReadOnlySpan<float>.Empty;
+        var systemForRecognition = ReadOnlySpan<float>.Empty;
+
+        if (_scheduler is not null)
+        {
+            micForRecognition = CopyForRecognition(mic, ref _micRecognitionBuffer, _micRecognitionFilter!);
+            systemForRecognition = CopyForRecognition(system, ref _systemRecognitionBuffer, _systemRecognitionFilter!);
+        }
+
         _micChain!.Process(mic);
         _systemChain!.Process(system);
 
@@ -466,10 +598,81 @@ public sealed class RecordingPipeline : IDisposable
 
         if (_scheduler is not null)
         {
-            FeedTranscription(_micChunker!, _micToStt!, mic, sttScratch);
-            FeedTranscription(_systemChunker!, _systemToStt!, system, sttScratch);
+            FeedTranscription(_micChunker!, _micToStt!, micForRecognition, sttScratch, _micRecognitionWriter);
+            FeedTranscription(_systemChunker!, _systemToStt!, systemForRecognition, sttScratch, _systemRecognitionWriter);
             _scheduler.ReportRecordingPosition((long)(_writer.DurationSeconds * 1000));
         }
+    }
+
+    /// <summary>
+    /// Opens the per-stream recognition audio files, or leaves them closed when
+    /// the second pass is not wanted.
+    /// </summary>
+    private void StartRecognitionCapture(string? directory)
+    {
+        _recognitionAudioDirectory = null;
+        _micRecognitionWriter = null;
+        _systemRecognitionWriter = null;
+
+        if (string.IsNullOrWhiteSpace(directory) || !_options.TranscriptionEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(directory);
+            _micRecognitionWriter = new WavFileWriter(
+                Path.Combine(directory, RecognitionAudioNames.Microphone), SpeechConstants.SampleRate);
+            _systemRecognitionWriter = new WavFileWriter(
+                Path.Combine(directory, RecognitionAudioNames.SystemAudio), SpeechConstants.SampleRate);
+            _recognitionAudioDirectory = directory;
+            _logger.Info(nameof(RecordingPipeline), $"Keeping per-stream recognition audio in '{directory}'.");
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(nameof(RecordingPipeline), "Could not open the recognition audio files.", ex);
+            AddWarning("再文字起こし用の音声を保存できません。停止後の高精度な文字起こしは実行できません。");
+            StopRecognitionCapture();
+        }
+    }
+
+    private void StopRecognitionCapture()
+    {
+        try
+        {
+            _micRecognitionWriter?.Flush();
+            _micRecognitionWriter?.Dispose();
+            _systemRecognitionWriter?.Flush();
+            _systemRecognitionWriter?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn(nameof(RecordingPipeline), $"Closing the recognition audio reported: {ex.Message}");
+        }
+        finally
+        {
+            _micRecognitionWriter = null;
+            _systemRecognitionWriter = null;
+        }
+    }
+
+    /// <summary>
+    /// Takes the recognition path's own copy of a block and removes any DC
+    /// offset, which a sound card can add and which costs the model nothing to
+    /// be rid of.
+    /// </summary>
+    private static ReadOnlySpan<float> CopyForRecognition(ReadOnlySpan<float> source, ref float[] buffer, DcBlocker filter)
+    {
+        if (buffer.Length < source.Length)
+        {
+            buffer = new float[source.Length];
+        }
+
+        var destination = buffer.AsSpan(0, source.Length);
+        source.CopyTo(destination);
+        filter.Process(destination);
+        return destination;
     }
 
     private void FillStream(
@@ -515,7 +718,12 @@ public sealed class RecordingPipeline : IDisposable
         }
     }
 
-    private void FeedTranscription(SpeechChunker chunker, Resampler resampler, ReadOnlySpan<float> source, float[] scratch)
+    private void FeedTranscription(
+        SpeechChunker chunker,
+        Resampler resampler,
+        ReadOnlySpan<float> source,
+        float[] scratch,
+        IAudioFileWriter? recognitionWriter)
     {
         var needed = resampler.EstimateOutputLength(source.Length);
         if (scratch.Length < needed)
@@ -524,8 +732,25 @@ public sealed class RecordingPipeline : IDisposable
         }
 
         var written = resampler.Process(source, scratch);
-        var chunks = chunker.Append(scratch.AsSpan(0, written));
-        foreach (var chunk in chunks)
+        var resampled = scratch.AsSpan(0, written);
+
+        if (recognitionWriter is not null)
+        {
+            try
+            {
+                recognitionWriter.Write(resampled);
+            }
+            catch (Exception ex)
+            {
+                // Losing the second pass is a disappointment; losing the meeting
+                // is not acceptable. Stop keeping the copy and carry on.
+                _logger.Error(nameof(RecordingPipeline), "Writing recognition audio failed; the second pass will be unavailable.", ex);
+                AddWarning("再文字起こし用の音声を保存できませんでした。停止後の高精度な文字起こしは実行できません。");
+                StopRecognitionCapture();
+            }
+        }
+
+        foreach (var chunk in chunker.Append(resampled))
         {
             _scheduler!.Enqueue(chunk);
         }
@@ -633,6 +858,8 @@ public sealed class RecordingPipeline : IDisposable
 
         var duration = TimeSpan.FromSeconds(_writer?.DurationSeconds ?? 0);
         var path = _writer?.FilePath ?? string.Empty;
+        var recognitionDirectory = _recognitionAudioDirectory;
+        StopRecognitionCapture();
 
         try
         {
@@ -654,7 +881,7 @@ public sealed class RecordingPipeline : IDisposable
         }
 
         _logger.Info(nameof(RecordingPipeline), $"Recording stopped after {duration:hh\\:mm\\:ss} -> {path}");
-        return new RecordingResult(path, duration, Warnings, drained);
+        return new RecordingResult(path, duration, Warnings, drained, recognitionDirectory);
     }
 
     private void AddWarning(string message)
@@ -689,6 +916,7 @@ public sealed class RecordingPipeline : IDisposable
             _logger.Warn(nameof(RecordingPipeline), $"Dispose-time stop reported: {ex.Message}");
         }
 
+        StopRecognitionCapture();
         _cts?.Dispose();
         _micSource?.Dispose();
         _systemSource?.Dispose();
@@ -707,4 +935,37 @@ public sealed class RecordingPipeline : IDisposable
 /// <param name="Duration">Length of the recording.</param>
 /// <param name="Warnings">Non-fatal problems worth telling the user about.</param>
 /// <param name="TranscriptionDrained">False when transcription still had a backlog at stop.</param>
-public sealed record RecordingResult(string AudioFilePath, TimeSpan Duration, IReadOnlyList<string> Warnings, bool TranscriptionDrained);
+/// <param name="AudioFilePath">The mixed recording the user keeps.</param>
+/// <param name="Duration">Wall-clock length of the recording.</param>
+/// <param name="Warnings">Non-fatal problems, copied into metadata.json.</param>
+/// <param name="TranscriptionDrained">False when the live transcript did not finish its backlog.</param>
+/// <param name="RecognitionAudioDirectory">
+/// Where the per-stream recognition audio was kept, or null when it was not.
+/// This is what the second transcription pass reads.
+/// </param>
+public sealed record RecordingResult(
+    string AudioFilePath,
+    TimeSpan Duration,
+    IReadOnlyList<string> Warnings,
+    bool TranscriptionDrained,
+    string? RecognitionAudioDirectory = null);
+
+/// <summary>File names of the per-stream recognition audio inside a meeting folder.</summary>
+public static class RecognitionAudioNames
+{
+    public const string Microphone = "recognition-mic.wav";
+
+    public const string SystemAudio = "recognition-system.wav";
+
+    /// <summary>The sources <see cref="Stt.TranscriptionRefiner"/> should be given for a meeting folder.</summary>
+    public static IReadOnlyList<Stt.RefinementSource> SourcesIn(string directory) => new[]
+    {
+        new Stt.RefinementSource(Path.Combine(directory, Microphone), Models.AudioSourceKind.Microphone),
+        new Stt.RefinementSource(Path.Combine(directory, SystemAudio), Models.AudioSourceKind.SystemAudio),
+    };
+
+    /// <summary>True when a meeting folder holds recognition audio worth re-transcribing.</summary>
+    public static bool ExistIn(string? directory)
+        => !string.IsNullOrWhiteSpace(directory)
+           && (File.Exists(Path.Combine(directory, Microphone)) || File.Exists(Path.Combine(directory, SystemAudio)));
+}
