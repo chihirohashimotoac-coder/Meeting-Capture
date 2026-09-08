@@ -103,14 +103,38 @@ AWS Transcribe、その他クラウド AI / STT API。
 
 ## 入手と起動方法
 
-1. GitHub Actions の最新の成功したビルドを開きます
-   （[Actions タブ](../../actions/workflows/build-windows.yml)）。
-2. Artifacts から `MeetingRecorder-win-x64` をダウンロードします。
-3. 中の `MeetingRecorder-win-x64.zip` を、書き込み可能な任意のフォルダーに展開します。
-   （例: `C:\Users\<ユーザー名>\Tools\MeetingRecorder\`。Program Files 配下は避けてください）
-4. `MeetingRecorder.exe` をダブルクリックします。
+1. [Actions タブ](../../actions/workflows/build-windows.yml) を開き、
+   **緑のチェック ✅ が付いた実行**をクリックします。
+2. 開いたページを**いちばん下までスクロール**します。
+   最下部に **Artifacts** という見出しの箱があり、その中に
+   `MeetingRecorder-win-x64` があります。クリックでダウンロードされます。
+3. ダウンロードした ZIP を右クリック →「プロパティ」→ 下部の
+   「**ブロックの解除**」にチェック → OK。
+   （インターネット由来の印を外しておくと、展開後の警告が減ります）
+4. **2 回展開します。** GitHub は Artifacts を ZIP で包んで配るため、
+   二重の ZIP になっています。
 
-タグ `v*` を push した場合は、GitHub Release（**下書き**として作成されます）からも取得できます。
+   ```
+   MeetingRecorder-win-x64.zip      GitHub が包んだ外側
+   └─ MeetingRecorder-win-x64.zip   本体
+      └─ MeetingRecorder.exe ほか
+   ```
+
+5. 書き込み可能な任意のフォルダーに展開します。
+   （例: `C:\Users\<ユーザー名>\Tools\MeetingRecorder\`。Program Files 配下は避けてください）
+6. `MeetingRecorder.exe` をダブルクリックします。
+
+**Artifacts が見つからないとき**
+
+| 症状 | 原因と対処 |
+| --- | --- |
+| Artifacts の箱が無い | **ジョブのログ画面**を開いています。パンくずでひとつ戻り、実行サマリーのページを開いてください |
+| 箱はあるが押せない | GitHub に**ログインしていない**状態です。Artifacts のダウンロードにはログインが必要です |
+| 実行が黄色い ● のまま | ビルド完了前です。Artifacts は**全ステップ終了後**に現れます |
+
+**Artifacts は 30 日で削除されます。** 恒久的な配布が必要な場合は、
+タグ `v*` を push してください。GitHub Release（**下書き**として作成されます）から
+ログインなしで取得できるようになります。
 
 ### 最初に 1 回だけ実行することを推奨します
 
