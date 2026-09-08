@@ -160,7 +160,11 @@ public sealed class DiagnosticsCollector
                 "テスト中はマイクに向かって話してください。無音のままなら、マイクがミュートされていないか、"
                 + "「プライバシーとセキュリティ > マイク」でデスクトップアプリのアクセスが許可されているかを確認してください。",
             noDataRemedy:
-                "マイクからデータが届いていません。デバイスを接続し直し、Windowsのサウンド設定で既定の入力デバイスに設定してください。"));
+                "マイクからデータが届いていません。デバイスを接続し直し、Windowsのサウンド設定で既定の入力デバイスに設定してください。",
+            accessDeniedRemedy:
+                "Windowsがマイクへのアクセスを拒否しました。「設定 > プライバシーとセキュリティ > マイク」を開き、"
+                + "「マイクへのアクセス」と「デスクトップ アプリがマイクにアクセスできるようにする」の両方をオンにしてください。"
+                + "この状態でも録音自体は開始でき、PC内部音声は記録されますが、マイク音声は入りません。"));
 
         var system = probe.Run(AudioSourceKind.SystemAudio, settings.RenderDeviceId, duration);
         report.Checks.Add(BuildProbeCheck(
@@ -178,12 +182,20 @@ public sealed class DiagnosticsCollector
         CaptureProbeResult result,
         TimeSpan duration,
         string noSignalRemedy,
-        string noDataRemedy)
+        string noDataRemedy,
+        string? accessDeniedRemedy = null)
     {
         if (!result.Opened)
         {
+            // A permission refusal looks identical to a missing device in the
+            // error text, and the advice for the two is completely different:
+            // reconnecting a working microphone will never fix a denied one.
+            var remedy = result.AccessDenied && accessDeniedRemedy is not null
+                ? accessDeniedRemedy
+                : noDataRemedy;
+
             return new DiagnosticCheck(id, title, DiagnosticStatus.Error,
-                $"エンドポイントを開けませんでした: {result.Error}", noDataRemedy);
+                $"エンドポイントを開けませんでした: {result.Error}", remedy);
         }
 
         var expected = (long)(duration.TotalSeconds * 48000);

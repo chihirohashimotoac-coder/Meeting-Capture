@@ -10,13 +10,20 @@ namespace MeetingRecorder.Core.Diagnostics;
 /// <param name="PeakDb">Loudest sample seen, in dBFS.</param>
 /// <param name="RmsDb">Average level, in dBFS.</param>
 /// <param name="Error">Why the endpoint could not be opened, when it could not.</param>
+/// <param name="AccessDenied">
+/// True when the endpoint refused on permission grounds. Worth separating from
+/// every other failure because it has one specific remedy - the Windows privacy
+/// setting - and because the endpoint enumerates normally right up until it is
+/// opened, so nothing earlier in the report hints at it.
+/// </param>
 public readonly record struct CaptureProbeResult(
     bool Opened,
     string DeviceName,
     long Samples,
     double PeakDb,
     double RmsDb,
-    string? Error)
+    string? Error,
+    bool AccessDenied = false)
 {
     /// <summary>True when data arrived and it was not digital silence.</summary>
     public bool HasSignal => Opened && Samples > 0 && PeakDb > -70.0;
@@ -52,6 +59,16 @@ public sealed class CaptureProbe
         _logger = logger ?? NullLogger.Instance;
     }
 
+    /// <summary>
+    /// Recognises a permission refusal. WASAPI surfaces it as an
+    /// <see cref="UnauthorizedAccessException"/>, but a COM layer in between can
+    /// hand back the raw HRESULT instead, so the code is matched as well.
+    /// </summary>
+    private static bool IsAccessDenied(Exception ex) =>
+        ex is UnauthorizedAccessException
+        || ex.Message.Contains("0x80070005", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("E_ACCESSDENIED", StringComparison.OrdinalIgnoreCase);
+
     public CaptureProbeResult Run(AudioSourceKind kind, string? deviceId, TimeSpan duration, int sampleRate = 48000)
     {
         IAudioCaptureSource? source = null;
@@ -65,7 +82,7 @@ public sealed class CaptureProbe
         catch (Exception ex)
         {
             _logger.Warn(nameof(CaptureProbe), $"{kind} could not be opened: {ex.Message}");
-            return new CaptureProbeResult(false, "-", 0, AudioMath.MinDb, AudioMath.MinDb, ex.Message);
+            return new CaptureProbeResult(false, "-", 0, AudioMath.MinDb, AudioMath.MinDb, ex.Message, IsAccessDenied(ex));
         }
 
         long samples = 0;
@@ -104,7 +121,8 @@ public sealed class CaptureProbe
         catch (Exception ex)
         {
             _logger.Warn(nameof(CaptureProbe), $"{kind} probe failed while capturing: {ex.Message}");
-            return new CaptureProbeResult(false, source.DeviceName, samples, AudioMath.MinDb, AudioMath.MinDb, ex.Message);
+            return new CaptureProbeResult(
+                false, source.DeviceName, samples, AudioMath.MinDb, AudioMath.MinDb, ex.Message, IsAccessDenied(ex));
         }
         finally
         {

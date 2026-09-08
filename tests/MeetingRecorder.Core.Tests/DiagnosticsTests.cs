@@ -87,6 +87,28 @@ public sealed class DiagnosticsTests : IDisposable
     }
 
     [Fact]
+    public void ADeniedMicrophoneIsToldToFixThePermissionRatherThanTheCable()
+    {
+        // Observed on a real Windows machine: the microphone enumerates, and the
+        // refusal only arrives when the endpoint is opened. Telling that user to
+        // reconnect the device sends them to fix something that is not broken.
+        var factory = new FakeCaptureFactory(
+            microphoneStartFailure: new UnauthorizedAccessException("Access is denied. (0x80070005 (E_ACCESSDENIED))"));
+
+        var report = Collector(factory, new FakeDeviceProvider(1, 1))
+            .Collect(Settings(), Environment(Array.Empty<string>()), captureSeconds: 0.4);
+
+        var mic = report.Checks.Single(c => c.Id == "D-04");
+
+        Assert.Equal(DiagnosticStatus.Error, mic.Status);
+        Assert.Contains("プライバシー", mic.Remedy);
+        Assert.DoesNotContain("接続し直し", mic.Remedy);
+
+        // The user also needs to know the recording is not lost, only the mic leg.
+        Assert.Contains("PC内部音声は記録されます", mic.Remedy);
+    }
+
+    [Fact]
     public void ReportsAnErrorWhenAnEndpointCannotBeOpened()
     {
         var report = Collector(new FakeCaptureFactory(failSystem: true), new FakeDeviceProvider(2, 0))

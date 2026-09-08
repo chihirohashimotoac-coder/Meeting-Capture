@@ -2,10 +2,14 @@
 
 最終更新: 2026-09-07 / 対象ブランチ: `claude/windows-meeting-recorder-app-slkq27`
 
-自動テスト合計 **163 件**（Core 132 / Stt 13 / App 10 / Audio 8）。すべて GitHub Actions の
+自動テスト合計 **169 件**（Core 135 / Stt 13 / App 10 / Audio 11）。すべて GitHub Actions の
 `windows-latest` 上で成功しています（実行記録:
-[run #22](https://github.com/chihirohashimotoac-coder/Meeting-Capture/actions/runs/34143240997)、
-commit `0fa21c7`）。
+[run #39](https://github.com/chihirohashimotoac-coder/Meeting-Capture/actions/runs/34172840832)、
+commit `5a9563e`）。
+
+このうち **3 件は実際の音声デバイスを開いて実測**します（2.11）。CI では
+サウンドカードの代役として仮想オーディオデバイスを導入しており、
+**WASAPI ループバックが再生中の音を実際に取得することを毎ビルド確認**しています。
 
 このうち 2 件（`RealModelRecognitionTests`）は**実際の whisper.cpp と実モデル**を使う
 テストで、モデルと音声ファイルが揃った専用ステップで再実行されます。CI では
@@ -46,9 +50,9 @@ commit `0fa21c7`）。
 | --- | --- | --- | --- |
 | ソリューション全体の restore | GitHub Actions / windows-latest | PASS | 10 プロジェクト |
 | Release ビルド（全プロジェクト） | GitHub Actions / windows-latest | PASS | WPF アプリを含む |
-| `MeetingRecorder.Core.Tests`（132 件） | GitHub Actions / windows-latest | PASS | DSP・永続化・パイプライン・話者分離・議事録 |
+| `MeetingRecorder.Core.Tests`（135 件） | GitHub Actions / windows-latest | PASS | DSP・永続化・パイプライン・話者分離・議事録 |
 | `MeetingRecorder.Stt.Tests`（13 件） | GitHub Actions / windows-latest | PASS | モデルダウンロード整合性・認識器契約 |
-| `MeetingRecorder.Audio.Tests`（8 件） | GitHub Actions / windows-latest | PASS | 実デバイス非依存の範囲のみ（下記 C も参照） |
+| `MeetingRecorder.Audio.Tests`（11 件） | GitHub Actions / windows-latest | PASS | うち 3 件は実オーディオデバイスを開いて実測（2.11） |
 | `MeetingRecorder.App.Tests`（10 件） | GitHub Actions / windows-latest | PASS | 全ウィンドウの XAML ロード＋データバインド検証 |
 | 自己完結型 publish（win-x64） | GitHub Actions / windows-latest | PASS | `--self-contained true` |
 | publish 出力の検証 | GitHub Actions / windows-latest | PASS | `MeetingRecorder.exe` / `hostfxr.dll` / `coreclr.dll` / `PresentationFramework.dll` / whisper ネイティブの存在確認 |
@@ -64,6 +68,10 @@ commit `0fa21c7`）。
 | SAPI による音声合成 | GitHub Actions / windows-latest | PASS | 213,486 バイトの英語音声を生成（16kHz/mono） |
 | **実 whisper.cpp による音声認識** | GitHub Actions / windows-latest | PASS | 下記 2.9 に認識結果を記載 |
 | **パッケージ済み実行ファイルの自己診断** | GitHub Actions / windows-latest | PASS | publish 出力の `MeetingRecorder.exe --diagnose` を起動し、11 チェックが実行されることを確認（詳細は 2.10） |
+| 仮想オーディオデバイスの導入（CI治具） | GitHub Actions / windows-latest | PASS | 失敗してもビルドは継続し、その場合はループバック検証を「未実施」と報告します |
+| **WASAPI ループバックによる実音声取得** | GitHub Actions / windows-latest | PASS | 再生したトーンを実際に取得（詳細は 2.11） |
+| **実デバイスを通した実録音** | GitHub Actions / windows-latest | PASS | 実 `RecordingPipeline` + 実 WASAPI で録音し、WAV を読み戻して検証（2.11） |
+| **配布バイナリによる D-05 実測** | GitHub Actions / windows-latest | PASS | 音を再生しながら `--diagnose --seconds 6` を実行し、D-05 が Ok でなければビルド失敗 |
 
 ---
 
@@ -277,6 +285,83 @@ CPU / RAM     : 4 論理コア / 16.0 GB
 
 ---
 
+### 2.11 実オーディオデバイスでの取得・録音（仮想エンドポイント上）
+
+GitHub のランナーにはサウンドカードが 1 枚もありません。そこで CI は
+**スピーカーの代役として仮想オーディオデバイスを導入**し、そのうえで
+製品と同じコードに実際に音を取得させています。
+
+**仮想オーディオドライバは CI の治具であり、製品の依存ではありません。**
+アプリは仮想ドライバも Stereo Mix も使わず、Windows が既定と報告する
+再生エンドポイントをそのままループバックします。今回はそのエンドポイントが
+たまたま仮想だった、という関係です。導入に失敗した場合、ビルドは継続し、
+ログに `T-09 remains not tested` と出力され、**検証済みには決してなりません。**
+
+| Test | Environment | Result | Notes |
+| --- | --- | --- | --- |
+| ループバックが再生中の音を取得する | GitHub Actions / windows-latest | PASS | 4.05 秒再生 → 192,000 サンプル（4.00 秒）取得、peak -0.1 dBFS |
+| **取得した音が「再生した音そのもの」であること** | GitHub Actions / windows-latest | PASS | Goertzel で 1 kHz と未使用の 3.3 kHz を比較 |
+| 無音の再生デバイスを fault にしない | GitHub Actions / windows-latest | PASS | 無音時も 70,560 サンプル届き、fault は 0 件 |
+| 実 `RecordingPipeline` での実録音 | GitHub Actions / windows-latest | PASS | 5.49 秒の WAV を生成し、読み戻してトーンの存在・長さ・非クリップを確認 |
+| 配布バイナリの D-05 実測 | GitHub Actions / windows-latest | PASS | 6 秒間に 286,560 サンプル（**想定の 100%**）/ peak -0.5 dBFS |
+
+CI ログからの逐語引用です。
+
+```
+Played 1000 Hz for 4.05 s.
+Captured 192000 samples (4.00 s), peak -0.1 dBFS, RMS -3.7 dBFS.
+Energy at 1000 Hz: 1.122E+004; at the unused control frequency 3300 Hz: 4.465E-006.
+```
+
+振幅だけならノイズやバッファ固着でも通ってしまうため、**再生した 1 kHz が
+支配的かどうか**を、鳴らしていない 3.3 kHz と比較しています。比は約 25 億倍で、
+取得したのが「再生していた音そのもの」であることは疑いようがありません。
+
+配布する実行ファイル自身の測定結果:
+
+```
+[ OK ] D-05  PC内部音声取得テスト (WASAPIループバック)
+      デバイス「CABLE Input」から 6 秒間に 286,560 サンプル受信（想定の 100%）
+      / peak -0.5 dBFS / RMS -20.1 dBFS — 信号を検出しました。
+```
+
+**これで確認できたこと:** WASAPI ループバックの実装が、実際に再生中の音声を
+取り落としなく（想定の 100%）取得すること。実 `RecordingPipeline` がそれを
+DSP・ミキサー・WAV ライターまで通してファイルに残すこと。配布するバイナリ自身が
+同じことを実測して報告すること。
+
+**これで確認できていないこと:** 仮想エンドポイントであり、実サウンドカード・
+実スピーカー・実 Bluetooth ではありません。**T-09（実機でのループバック）は
+引き続き未実施です。** また CI ではマイク側が権限拒否されたため（下記）、
+**マイクとPC音声の同時録音（T-15）は実演できていません。**
+
+### 2.12 実デバイスで発見・修正した不具合
+
+実デバイスを開くテストを入れた初回の実行で、製品側の不具合が 1 件見つかりました。
+
+| 事象 | 内容 |
+| --- | --- |
+| 症状 | マイク権限が拒否されている環境で、**録音が一切開始できない**（PC内部音声も道連れ） |
+| 原因 | Windows は列挙時ではなく `AudioClient.Initialize` で拒否する。`RecordingPipeline.Start` の `_micSource.Start()` が無防備で、例外がそのまま外へ出ていた |
+| 影響 | 要件「片方が失敗しても録音を継続する」に違反。マイク権限がオフのユーザーは会議を丸ごと失う |
+| 修正 | 各系統の開始を防御し、失敗はその系統を落として警告に変換。両方失敗時のみ、後始末をしてから対処付きで失敗する |
+| 検証 | CI 上で実際に権限拒否が発生し、**PC内部音声のみで 5.49 秒の録音を継続**することを実測（下記） |
+
+```
+Warning: マイクの録音を開始できませんでした（Access is denied. (0x80070005 (E_ACCESSDENIED))）。
+         「設定 > プライバシーとセキュリティ > マイク」でデスクトップアプリのマイク使用を許可してください。
+Recorded 5.49 s to ...\meeting.wav
+File: 48000 Hz, 1 ch, 5.49 s, 263638 samples.
+Peak -6.9 dBFS; energy at 1000 Hz 4.398E+003 against 6.587E-006 at 3300 Hz.
+```
+
+診断レポート側も、アクセス拒否のときだけ「デバイスを接続し直す」ではなく
+プライバシー設定を案内するよう修正しました（回帰テスト付き）。
+
+**この不具合は、合成デバイスだけを使っていた間は一度も現れませんでした。**
+
+---
+
 ---
 
 ## 3. C. Windows 実機確認が必要（すべて未実施）
@@ -302,23 +387,28 @@ CPU / RAM     : 4 論理コア / 16.0 GB
 **このマッピングは「実行方法が用意された」という意味であり、「実行済み」ではありません。**
 実行して初めて下表の `Result` を更新できます。
 
+なお 2.11 のとおり、**T-09 の中核メカニズム（ループバックが再生音を取得すること）は
+CI の仮想エンドポイント上では実測済み**です。それでも下表の T-09 を `Not tested` の
+ままにしてあるのは、実サウンドカード・実スピーカー・実 Bluetooth での挙動が
+仮想デバイスと同じである保証はないからです。**実機で確認するまで PASS にはしません。**
+
 | ID | Test | Environment | Result | 理由 |
 | --- | --- | --- | --- | --- |
 | T-01 | ZIP展開のみで起動できる | Not tested | — | ランナーで GUI アプリを起動していない |
 | T-02 | SmartScreen の挙動 | Not tested | — | ランナーには SmartScreen の実行環境がない |
 | T-03 | 一般ユーザー権限での動作 | Not tested | — | ランナーは管理者権限で動作 |
-| T-04 | マイク認識 | Not tested | — | **ランナーに実マイクが存在しない**（`--diagnose` の D-01 で確認可） |
-| T-05 | 再生デバイス認識 | Not tested | — | **ランナーに実スピーカーが存在しない**（`--diagnose` の D-02 で確認可） |
+| T-04 | マイク認識 | Not tested | — | 実マイクでは未実施。CI では仮想入力デバイスの列挙まで確認（`--diagnose` の D-01 で確認可） |
+| T-05 | 再生デバイス認識 | Not tested | — | 実スピーカーでは未実施。CI では仮想再生デバイスの列挙まで確認（`--diagnose` の D-02 で確認可） |
 | T-06 | マイクのプライバシー設定 | Not tested | — | 実機の Windows 設定が必要（`--diagnose` の D-03 で確認可） |
-| T-07 | 録音前のマイクレベルメーター | Not tested | — | 実音声入力が必要（`--diagnose --seconds 10` の D-04 で確認可） |
+| T-07 | 録音前のマイクレベルメーター | Not tested | — | 実音声入力が必要（`--diagnose --seconds 10` の D-04 で確認可）。CI のマイクは権限拒否のため未実測 |
 | T-08 | 録音前のPC音声レベルメーター | Not tested | — | 実再生が必要 |
-| T-09 | **WASAPI ループバックでのPC内部音声取得** | Not tested | — | **本製品の中核。実機必須**（`--diagnose --seconds 10` の D-05 で確認可） |
+| T-09 | **WASAPI ループバックでのPC内部音声取得** | Not tested | — | **実サウンドカードでは未実施。**ただし CI の仮想再生エンドポイント上では取得を実測済み（2.11）（`--diagnose --seconds 10` の D-05 で確認可） |
 | T-10 | Zoom 音声の取得 | Not tested | — | Zoom の実音声が必要 |
 | T-11 | Google Meet 音声の取得 | Not tested | — | Meet の実音声が必要 |
 | T-12 | Microsoft Teams 音声の取得 | Not tested | — | Teams の実音声が必要 |
 | T-13 | 仮想オーディオドライバ非依存 | Not tested | — | 実機構成の確認が必要 |
 | T-14 | Stereo Mix 非依存 | Not tested | — | 実機構成の確認が必要 |
-| T-15 | マイク＋PC音声の同時録音 | Not tested | — | 実デバイス2系統が必要 |
+| T-15 | マイク＋PC音声の同時録音 | Not tested | — | 実デバイス2系統が必要。**CI ではマイク側が権限拒否のため実演できていません**（2.11） |
 | T-16 | 30分録音での同期精度 | Not tested | — | 実クロック差の測定が必要 |
 | T-17 | 1時間録音での同期精度 | Not tested | — | 同上 |
 | T-18 | 30分録音の安定性 | Not tested | — | 実機の長時間動作 |
@@ -364,6 +454,8 @@ CPU / RAM     : 4 論理コア / 16.0 GB
 | 実機での性能実測 | 未実施。`ProfileSelector` の RTF 推定値は基準機の想定値であり、実測で較正されていません（実行中の実測 RTF による自動劣化は実装済み） |
 | 話者分離の精度評価 | 未実施。合成音声での分離のみ確認しています |
 | 日本語での認識精度 | 未実施。CI で確認できたのは**英語の合成音声**までです（2.9）。日本語は T-23 |
+| 実サウンドカードでの動作 | 未実施。CI で確認したのは仮想オーディオデバイス上です（2.11）。実機の挙動が同一である保証はありません |
+| マイクとPC音声の同時録音 | 未実演。CI ではマイク側が権限拒否のため、片系統ずつの確認にとどまります（T-15） |
 | コード署名の代替 | 未実施。配布 ZIP の SHA-256 は Actions のログから取得できますが、リリースに署名は付いていません |
 | OpenVINO / GPU 高速化 | 未実装（CPU のみ。要件どおり GPU 必須にはしていません） |
 
