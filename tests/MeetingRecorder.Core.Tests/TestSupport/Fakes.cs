@@ -14,6 +14,7 @@ public sealed class FakeCaptureSource : IAudioCaptureSource
     private readonly float[] _pattern;
     private readonly int _blockSamples;
     private readonly double _clockScale;
+    private readonly Exception? _startFailure;
     private Thread? _thread;
     private volatile bool _running;
     private int _position;
@@ -24,8 +25,10 @@ public sealed class FakeCaptureSource : IAudioCaptureSource
         int sampleRate = 48000,
         string deviceName = "Fake device",
         double clockScale = 1.0,
-        int blockMilliseconds = 20)
+        int blockMilliseconds = 20,
+        Exception? startFailure = null)
     {
+        _startFailure = startFailure;
         Kind = kind;
         _pattern = pattern.Length == 0 ? new float[sampleRate] : pattern;
         SampleRate = sampleRate;
@@ -50,6 +53,14 @@ public sealed class FakeCaptureSource : IAudioCaptureSource
 
     public void Start()
     {
+        // A device that enumerates and then refuses to open. WASAPI does exactly
+        // this when Windows privacy settings deny microphone access: the
+        // endpoint is listed, and AudioClient.Initialize returns E_ACCESSDENIED.
+        if (_startFailure is not null)
+        {
+            throw _startFailure;
+        }
+
         if (_running)
         {
             return;
@@ -108,14 +119,20 @@ public sealed class FakeCaptureFactory : IAudioCaptureFactory
     private readonly bool _failMicrophone;
     private readonly bool _failSystem;
     private readonly double _micClockScale;
+    private readonly Exception? _microphoneStartFailure;
+    private readonly Exception? _systemStartFailure;
 
     public FakeCaptureFactory(
         float[]? micPattern = null,
         float[]? systemPattern = null,
         bool failMicrophone = false,
         bool failSystem = false,
-        double micClockScale = 1.0)
+        double micClockScale = 1.0,
+        Exception? microphoneStartFailure = null,
+        Exception? systemStartFailure = null)
     {
+        _microphoneStartFailure = microphoneStartFailure;
+        _systemStartFailure = systemStartFailure;
         _micPattern = micPattern ?? SignalGenerator.Sine(220, 1.0, 48000, 0.2);
         _systemPattern = systemPattern ?? SignalGenerator.Sine(660, 1.0, 48000, 0.2);
         _failMicrophone = failMicrophone;
@@ -132,7 +149,9 @@ public sealed class FakeCaptureFactory : IAudioCaptureFactory
             throw new InvalidOperationException("マイクを開けません（テスト）。");
         }
 
-        var source = new FakeCaptureSource(AudioSourceKind.Microphone, _micPattern, targetSampleRate, "Fake microphone", _micClockScale);
+        var source = new FakeCaptureSource(
+            AudioSourceKind.Microphone, _micPattern, targetSampleRate, "Fake microphone", _micClockScale,
+            startFailure: _microphoneStartFailure);
         Created.Add(source);
         return source;
     }
@@ -144,7 +163,9 @@ public sealed class FakeCaptureFactory : IAudioCaptureFactory
             throw new InvalidOperationException("PC内部音声を開けません（テスト）。");
         }
 
-        var source = new FakeCaptureSource(AudioSourceKind.SystemAudio, _systemPattern, targetSampleRate, "Fake speakers");
+        var source = new FakeCaptureSource(
+            AudioSourceKind.SystemAudio, _systemPattern, targetSampleRate, "Fake speakers",
+            startFailure: _systemStartFailure);
         Created.Add(source);
         return source;
     }

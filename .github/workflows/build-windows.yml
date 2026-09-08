@@ -45,6 +45,35 @@ jobs:
             echo "$action@v4 -> ${sha:-<unresolved>}"
           done
 
+      - name: Lint the workflows
+        shell: pwsh
+        run: |
+          # Catches the Windows PowerShell 5.1 encoding trap (a non-ASCII literal
+          # in a `shell: powershell` step breaks the parser, not just the
+          # display) and missing least-privilege permissions.
+          python -m pip install --quiet --disable-pip-version-check pyyaml
+          python tools/check_workflows.py
+
+      - name: Check the PowerShell helper scripts parse
+        shell: pwsh
+        run: |
+          # tools/*.ps1 are run by users on their own machines, so a syntax
+          # error would only be discovered by the person trying to verify the
+          # product's privacy claim. Parse them here instead.
+          $failed = $false
+          Get-ChildItem -Path tools -Filter *.ps1 -Recurse | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors -and $errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "::error::$($_.Name) has $($errors.Count) parse error(s)"
+              $errors | ForEach-Object { Write-Host "  $($_.Extent.StartLineNumber): $($_.Message)" }
+            } else {
+              Write-Host "$($_.Name): OK"
+            }
+          }
+          if ($failed) { throw "One or more PowerShell scripts failed to parse." }
+
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v4
         with:
@@ -70,6 +99,236 @@ jobs:
           --no-build
           --logger "trx;LogFileName=test-results.trx"
           --results-directory ${{ github.workspace }}/TestResults
+
+      # ---- Real-engine verification -----------------------------------------
+      # Everything above this point uses test doubles for speech recognition.
+      # The next three steps run the actual whisper.cpp engine over actual
+      # speech, which is what shows the native binary loads and that the
+      # chunker feeds it something it can transcribe.
+
+      - name: Cache the speech model used for the real-engine test
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.test-model
+          key: whisper-tiny-q5_1-818710568da3
+
+      - name: Download the speech model
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $dir = "${{ github.workspace }}/.test-model"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $path = Join-Path $dir "ggml-tiny-q5_1.bin"
+
+          # The same URL and the same pinned hash the application uses, so this
+          # doubles as a check that the pin still matches what is published.
+          Invoke-WebRequest -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin" -OutFile $path
+
+          $expected = "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7"
+          $actual = (Get-FileHash $path -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "Model SHA-256 mismatch. expected=$expected actual=$actual" }
+          Write-Host "Model downloaded and SHA-256 verified against the pinned value."
+
+      - name: Synthesise speech for the real-engine test
+        id: speech
+        # Windows PowerShell 5.1: System.Speech is not part of the .NET Core BCL
+        # that pwsh 7 loads, so SAPI is only reachable from the desktop runtime.
+        #
+        # This script is deliberately pure ASCII. Windows PowerShell 5.1 reads a
+        # .ps1 without a BOM as ANSI, and the runner writes step scripts as UTF-8
+        # without one - so a Japanese string literal here does not merely display
+        # wrongly, it breaks the parser and the whole step fails to compile. The
+        # sample sentences therefore live in files that are read as UTF-8.
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = "${{ github.workspace }}/.test-audio"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $path = Join-Path $dir "speech.wav"
+
+          try {
+            Add-Type -AssemblyName System.Speech
+            $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+
+            $voices = $synth.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo }
+            Write-Host "Installed voices: $($voices.Name -join ', ')"
+            if (-not $voices) { throw "No speech voices are installed on this runner." }
+
+            # Prefer Japanese, because that is what the product transcribes.
+            # Windows Server images normally ship only en-US voices, so the
+            # language actually used is reported rather than assumed.
+            $japanese = $voices | Where-Object { $_.Culture.Name -like 'ja*' } | Select-Object -First 1
+            if ($japanese) {
+              $synth.SelectVoice($japanese.Name)
+              $sampleFile = "${{ github.workspace }}/tools/speech-sample-ja.txt"
+              $language = "ja"
+              $expect = ""
+            } else {
+              $sampleFile = "${{ github.workspace }}/tools/speech-sample-en.txt"
+              $language = "en"
+              $expect = "meeting,recorder,test,budget,review,monday"
+            }
+
+            $text = [System.IO.File]::ReadAllText($sampleFile, [System.Text.Encoding]::UTF8).Trim()
+            Write-Host "Language: $language"
+
+            $format = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono)
+            $synth.SetOutputToWaveFile($path, $format)
+            $synth.Rate = -1
+            $synth.Speak($text)
+            $synth.Dispose()
+
+            $size = (Get-Item $path).Length
+            if ($size -lt 20000) { throw "The synthesised WAV is only $size bytes; no usable audio was produced." }
+
+            Write-Host "Synthesised $size bytes of $language speech."
+            "synthesized=true"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+            "language=$language" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+            "expect=$expect"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          } catch {
+            # No voice on the image is a real possibility. Say so loudly instead
+            # of letting the real-engine test quietly not run.
+            Write-Host "::warning::Speech synthesis unavailable on this runner: $($_.Exception.Message)"
+            Write-Host "::warning::The real-engine speech recognition test will NOT run for this build."
+            "synthesized=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          }
+
+      - name: Run speech recognition against the real model
+        if: steps.speech.outputs.synthesized == 'true'
+        env:
+          MEETINGRECORDER_TEST_MODEL: ${{ github.workspace }}/.test-model/ggml-tiny-q5_1.bin
+          MEETINGRECORDER_TEST_AUDIO: ${{ github.workspace }}/.test-audio/speech.wav
+          MEETINGRECORDER_TEST_LANGUAGE: ${{ steps.speech.outputs.language }}
+          MEETINGRECORDER_TEST_EXPECT: ${{ steps.speech.outputs.expect }}
+          # Turns "fixtures missing, skipping" into a failure, so a broken
+          # fixture step cannot silently disable this verification.
+          MEETINGRECORDER_REQUIRE_REAL_STT: '1'
+        run: >
+          dotnet test tests/MeetingRecorder.Stt.Tests/MeetingRecorder.Stt.Tests.csproj
+          --configuration Release
+          --no-build
+          --filter "FullyQualifiedName~RealModelRecognitionTests"
+          --logger "console;verbosity=detailed"
+
+      - name: Install a virtual audio endpoint (CI fixture only)
+        id: virtual_audio
+        # A GitHub-hosted Windows runner has no sound card at all, which is why
+        # every audio assertion so far has amounted to "the call did not throw".
+        # This installs a virtual audio device so the next step can play a tone
+        # and check that the product's own WASAPI loopback source really
+        # captures it.
+        #
+        # This is a stand-in for a speaker, in CI only. The application neither
+        # needs nor uses a virtual audio driver - that is an explicit
+        # requirement - and nothing installed here is shipped or referenced by
+        # the application. The recorder still captures whatever render endpoint
+        # Windows reports as the default; here that endpoint happens to be
+        # virtual.
+        #
+        # continue-on-error: if this fails the build carries on and the next
+        # step reports loopback capture as untested. It must never turn into a
+        # claim that audio was verified.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $installed = $false
+
+          try {
+            Start-Service -Name audiosrv -ErrorAction SilentlyContinue
+            $service = Get-Service -Name audiosrv -ErrorAction SilentlyContinue
+            Write-Host "Windows Audio service: $($service.Status)"
+
+            $work = Join-Path $env:RUNNER_TEMP "virtual-audio"
+            New-Item -ItemType Directory -Force -Path $work | Out-Null
+            $zip = Join-Path $work "cable.zip"
+
+            $sources = @(
+              "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip",
+              "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip"
+            )
+
+            $downloaded = $false
+            foreach ($url in $sources) {
+              try {
+                Write-Host "Fetching $url"
+                Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 180
+                $downloaded = $true
+                $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+                Write-Host ("  {0:N0} bytes, SHA-256 {1}" -f (Get-Item $zip).Length, $hash)
+                break
+              } catch {
+                Write-Host "  not available: $($_.Exception.Message)"
+              }
+            }
+
+            if (-not $downloaded) { throw "No virtual audio driver package could be downloaded." }
+
+            Expand-Archive -Path $zip -DestinationPath $work -Force
+            Get-ChildItem $work -Recurse -File | ForEach-Object { Write-Host "  $($_.Name)" }
+
+            # Pre-trusting the publisher is what makes the install non-interactive;
+            # without it Windows waits for a dialog nobody is there to click.
+            foreach ($cat in Get-ChildItem $work -Recurse -Filter *.cat) {
+              $signature = Get-AuthenticodeSignature $cat.FullName
+              if ($signature.SignerCertificate) {
+                $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPublisher", "LocalMachine")
+                $store.Open("ReadWrite")
+                $store.Add($signature.SignerCertificate)
+                $store.Close()
+                Write-Host "Trusted publisher: $($signature.SignerCertificate.Subject)"
+                break
+              }
+            }
+
+            $setup = Get-ChildItem $work -Recurse -Filter "VBCABLE_Setup_x64.exe" | Select-Object -First 1
+            if (-not $setup) { throw "The package did not contain the expected setup program." }
+
+            $process = Start-Process -FilePath $setup.FullName -ArgumentList "-i", "-h" -Wait -PassThru
+            Write-Host "Setup exit code: $($process.ExitCode)"
+
+            # The audio endpoint appears a moment after the device node does.
+            for ($i = 0; $i -lt 15; $i++) {
+              $media = @(Get-PnpDevice -Class MEDIA -Status OK -ErrorAction SilentlyContinue)
+              if ($media.Count -gt 0) { break }
+              Start-Sleep -Seconds 2
+            }
+
+            $media = @(Get-PnpDevice -Class MEDIA -Status OK -ErrorAction SilentlyContinue)
+            if ($media.Count -gt 0) {
+              $media | Format-Table -AutoSize Status, Class, FriendlyName | Out-String | Write-Host
+            }
+            $installed = $media.Count -gt 0
+          }
+          catch {
+            Write-Host "::warning::Could not install a virtual audio endpoint: $($_.Exception.Message)"
+          }
+
+          "installed=$($installed.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          if ($installed) {
+            Write-Host "A virtual audio endpoint is present; loopback capture will be exercised for real."
+          } else {
+            Write-Host "::warning::No virtual audio endpoint; WASAPI loopback capture stays untested in this build."
+          }
+
+      - name: Verify WASAPI loopback captures what Windows is playing
+        env:
+          # 1 turns "no render endpoint, skip" into a failure, so a broken
+          # fixture cannot silently disable the check.
+          MEETINGRECORDER_REQUIRE_LOOPBACK: ${{ steps.virtual_audio.outputs.installed == 'true' && '1' || '0' }}
+        shell: pwsh
+        run: |
+          dotnet test tests/MeetingRecorder.Audio.Tests/MeetingRecorder.Audio.Tests.csproj `
+            --configuration Release `
+            --no-build `
+            --filter "FullyQualifiedName~LoopbackCaptureTests|FullyQualifiedName~RealDeviceRecordingTests" `
+            --logger "console;verbosity=detailed"
+
+          if ($env:MEETINGRECORDER_REQUIRE_LOOPBACK -ne "1") {
+            Write-Host "::warning::The loopback tests skipped: this runner had no audio endpoint. T-09 remains not tested."
+          }
 
       - name: Publish self-contained win-x64
         run: >
@@ -148,6 +407,111 @@ jobs:
             $archive.Dispose()
           }
 
+      - name: Run the packaged application's own self-diagnosis
+        shell: pwsh
+        # Launches the real MeetingRecorder.exe from the publish output. This is
+        # the only step that runs the shipped binary, and it exercises device
+        # enumeration, the pre-flight checks and the connection inspector on a
+        # real Windows machine.
+        #
+        # A GitHub runner has no audio hardware, so the report is EXPECTED to
+        # contain device errors. What is being verified here is that the
+        # executable starts, runs its checks and reports honestly - not that
+        # audio works. Whether audio works can only be established on a physical
+        # machine (docs/WINDOWS_E2E_TEST.md).
+        run: |
+          $exe = "${{ github.workspace }}/publish/${{ env.ARTIFACT_NAME }}/MeetingRecorder.exe"
+          $json = "${{ github.workspace }}/artifacts/diagnose.json"
+
+          # --seconds 0 skips the live capture probe: with no endpoints to open
+          # there is nothing to listen to.
+          $process = Start-Process -FilePath $exe `
+            -ArgumentList '--diagnose', '--seconds', '0', '--json', $json `
+            -NoNewWindow -Wait -PassThru `
+            -RedirectStandardOutput "${{ github.workspace }}/artifacts/diagnose.txt" `
+            -RedirectStandardError  "${{ github.workspace }}/artifacts/diagnose.err"
+
+          Write-Host "--- diagnose stdout ---"
+          if (Test-Path "${{ github.workspace }}/artifacts/diagnose.txt") {
+            Get-Content "${{ github.workspace }}/artifacts/diagnose.txt" | Write-Host
+          }
+          Write-Host "--- diagnose stderr ---"
+          if (Test-Path "${{ github.workspace }}/artifacts/diagnose.err") {
+            Get-Content "${{ github.workspace }}/artifacts/diagnose.err" | Write-Host
+          }
+          Write-Host "--- exit code: $($process.ExitCode) ---"
+
+          if (-not (Test-Path $json)) {
+            throw "The packaged application did not produce a diagnostic report; it may have failed to start."
+          }
+
+          $report = Get-Content $json -Raw | ConvertFrom-Json
+          if ($report.checks.Count -lt 5) {
+            throw "The diagnostic report contains only $($report.checks.Count) checks; it did not run properly."
+          }
+
+          Write-Host "The packaged executable ran $($report.checks.Count) self-checks. Overall: $($report.overall)"
+
+      - name: Run the packaged self-diagnosis with audio actually playing
+        # The step above runs the shipped binary but skips its capture probe,
+        # because with no endpoints there is nothing to listen to. Here there is:
+        # a tone is played while the same binary listens, so D-04 and D-05 - the
+        # microphone and the WASAPI loopback probes a user runs on their own
+        # machine - are measured rather than skipped.
+        if: steps.virtual_audio.outputs.installed == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "${{ github.workspace }}/publish/${{ env.ARTIFACT_NAME }}/MeetingRecorder.exe"
+          $json = "${{ github.workspace }}/artifacts/diagnose-with-audio.json"
+          $audio = "${{ github.workspace }}/.test-audio/speech.wav"
+
+          if (-not (Test-Path $audio)) {
+            Write-Host "::warning::No synthesised audio to play; skipping the capture probe check."
+            exit 0
+          }
+
+          # SoundPlayer plays through the default render endpoint, which is the
+          # endpoint the loopback probe listens to.
+          Add-Type -AssemblyName System.Windows.Forms
+          $player = New-Object System.Media.SoundPlayer($audio)
+          $player.PlayLooping()
+
+          try {
+            $process = Start-Process -FilePath $exe `
+              -ArgumentList '--diagnose', '--seconds', '6', '--json', $json `
+              -NoNewWindow -Wait -PassThru `
+              -RedirectStandardOutput "${{ github.workspace }}/artifacts/diagnose-with-audio.txt" `
+              -RedirectStandardError  "${{ github.workspace }}/artifacts/diagnose-with-audio.err"
+          }
+          finally {
+            $player.Stop()
+          }
+
+          Write-Host "--- diagnose stdout ---"
+          Get-Content "${{ github.workspace }}/artifacts/diagnose-with-audio.txt" | Write-Host
+          Write-Host "--- exit code: $($process.ExitCode) ---"
+
+          $report = Get-Content $json -Raw | ConvertFrom-Json
+          $loopback = $report.checks | Where-Object { $_.id -eq "D-05" }
+          $microphone = $report.checks | Where-Object { $_.id -eq "D-04" }
+
+          if (-not $loopback) {
+            throw "The report contains no D-05 check; the capture probe did not run."
+          }
+
+          Write-Host "D-04: $($microphone.status) - $($microphone.detail)"
+          Write-Host "D-05: $($loopback.status) - $($loopback.detail)"
+
+          # D-05 is the product's core claim: the shipped binary opened a render
+          # endpoint in loopback mode and received the audio the machine was
+          # playing. Anything other than Ok here means it did not.
+          if ($loopback.status -ne "Ok") {
+            throw "D-05 reported '$($loopback.status)' while audio was playing: $($loopback.detail)"
+          }
+
+          Write-Host "The shipped binary measured WASAPI loopback capture with audio playing."
+
       - name: Upload distribution artifact
         uses: actions/upload-artifact@v4
         with:
@@ -161,6 +525,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results
-          path: ${{ github.workspace }}/TestResults
+          path: |
+            ${{ github.workspace }}/TestResults
+            ${{ github.workspace }}/artifacts/diagnose.txt
+            ${{ github.workspace }}/artifacts/diagnose.json
           if-no-files-found: warn
           retention-days: 14
