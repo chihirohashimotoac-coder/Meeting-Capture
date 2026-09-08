@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using MeetingRecorder.Core.Audio;
+using MeetingRecorder.Core.Pipeline;
 using MeetingRecorder.Core.Models;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
@@ -246,6 +247,210 @@ public class LoopbackCaptureTests
     /// Energy at one frequency, by the Goertzel algorithm. Cheaper than an FFT
     /// and enough to answer "is the tone that was played present in this audio".
     /// </summary>
+    private static double Goertzel(IReadOnlyList<float> samples, double frequency)
+    {
+        if (samples.Count == 0)
+        {
+            return 0.0;
+        }
+
+        var coefficient = 2.0 * Math.Cos(2.0 * Math.PI * frequency / SampleRate);
+        double s1 = 0.0, s2 = 0.0;
+
+        for (var i = 0; i < samples.Count; i++)
+        {
+            var s0 = samples[i] + (coefficient * s1) - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+
+        var power = (s1 * s1) + (s2 * s2) - (coefficient * s1 * s2);
+        return power / samples.Count;
+    }
+}
+
+/// <summary>
+/// Records a real meeting-shaped session through the real WASAPI stack and
+/// checks that the audio that was playing ends up in the file.
+/// </summary>
+/// <remarks>
+/// <para>
+/// This is the closest thing to the product that can run without a person in
+/// the room: the actual <see cref="MeetingRecorder.Core.Pipeline.RecordingPipeline"/>,
+/// the actual <see cref="WasapiCaptureFactory"/>, both capture legs, the DSP
+/// chains, the mixer and the WAV writer. Only the meeting itself is synthetic.
+/// </para>
+/// <para>
+/// On CI the virtual cable feeds its own capture endpoint, so both legs receive
+/// the tone and the two-stream path is genuinely exercised. On a machine with a
+/// real microphone the microphone leg records whatever the room is doing, which
+/// is fine - the assertions are about the render leg and about the file.
+/// </para>
+/// </remarks>
+public class RealDeviceRecordingTests
+{
+    private const int ToneHz = 1000;
+    private const int SampleRate = 48000;
+
+    private readonly ITestOutputHelper _output;
+
+    public RealDeviceRecordingTests(ITestOutputHelper output) => _output = output;
+
+    private static bool OnWindows => RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+
+    private static bool Required =>
+        Environment.GetEnvironmentVariable("MEETINGRECORDER_REQUIRE_LOOPBACK") == "1";
+
+    [Fact]
+    public void ARecordingMadeThroughTheRealDevicesContainsTheAudioThatWasPlaying()
+    {
+        if (!OnWindows)
+        {
+            return;
+        }
+
+        using (var probe = TryGetRenderEndpoint())
+        {
+            if (probe is null)
+            {
+                Assert.False(Required, "MEETINGRECORDER_REQUIRE_LOOPBACK=1 but this machine has no render endpoint.");
+                return;
+            }
+
+            _output.WriteLine($"Recording with render endpoint: {probe.FriendlyName}");
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), "mr-e2e-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var audioPath = Path.Combine(root, "meeting.wav");
+            var options = new RecordingPipelineOptions
+            {
+                SampleRate = SampleRate,
+
+                // No model is present here and none is needed: what is under test
+                // is capture, mixing and writing, not recognition.
+                TranscriptionEnabled = false,
+            };
+
+            var settings = new AppSettings
+            {
+                // Never leave the runner (or a developer's laptop) awake after a
+                // test; sleep suppression has its own tests.
+                PreventSleepWhileRecording = false,
+            };
+
+            using var pipeline = new RecordingPipeline(options, new WasapiCaptureFactory(), new TranscriptStore());
+
+            pipeline.Start(
+                audioPath,
+                settings,
+                recognizer: null,
+                journal: null,
+                spillDirectory: Path.Combine(root, "spill"));
+
+            PlayTone(ToneHz, gain: 0.5, seconds: 5);
+
+            var result = pipeline.Stop();
+
+            foreach (var warning in result.Warnings)
+            {
+                _output.WriteLine($"Warning: {warning}");
+            }
+
+            _output.WriteLine($"Recorded {result.Duration.TotalSeconds:F2} s to {result.AudioFilePath}");
+            Assert.True(File.Exists(result.AudioFilePath), "the recording produced no file");
+
+            using var reader = new WavFileReader(result.AudioFilePath);
+            var samples = reader.ReadAllMono();
+
+            _output.WriteLine(
+                $"File: {reader.SampleRate} Hz, {reader.Channels} ch, {reader.DurationSeconds:F2} s, {samples.Length} samples.");
+
+            // The pipeline runs on a wall clock, so the file length reflects real
+            // elapsed time rather than however much the device chose to deliver.
+            Assert.Equal(SampleRate, reader.SampleRate);
+            Assert.InRange(reader.DurationSeconds, 4.0, 9.0);
+
+            var peak = 0f;
+            foreach (var sample in samples)
+            {
+                peak = Math.Max(peak, Math.Abs(sample));
+            }
+
+            var toneEnergy = Goertzel(samples, ToneHz);
+            var controlEnergy = Goertzel(samples, 3300);
+            _output.WriteLine(
+                $"Peak {20 * Math.Log10(Math.Max(peak, 1e-9)):F1} dBFS; energy at {ToneHz} Hz {toneEnergy:E3} against {controlEnergy:E3} at 3300 Hz.");
+
+            Assert.True(
+                peak > 0.02f,
+                "the recording is silent: the capture legs produced nothing that reached the file");
+
+            Assert.True(
+                toneEnergy > controlEnergy * 20.0,
+                "the recorded file is not dominated by the tone that was played while recording");
+
+            // A clipped file would also pass the checks above, and clipping is the
+            // failure the DSP chain exists to prevent.
+            Assert.True(peak <= 1.0f, "the recording clipped");
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch (IOException)
+            {
+                // A file the OS still holds open is not a test failure.
+            }
+        }
+    }
+
+    private static MMDevice? TryGetRenderEndpoint()
+    {
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            return enumerator.HasDefaultAudioEndpoint(DataFlow.Render, Role.Console)
+                ? enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Console)
+                : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private void PlayTone(int frequency, double gain, int seconds)
+    {
+        using var device = TryGetRenderEndpoint();
+        Assert.NotNull(device);
+
+        var generator = new SignalGenerator(SampleRate, 1)
+        {
+            Type = SignalGeneratorType.Sin,
+            Frequency = frequency,
+            Gain = gain,
+        };
+
+        using var output = new WasapiOut(device, AudioClientShareMode.Shared, useEventSync: true, latency: 100);
+        output.Init(generator.Take(TimeSpan.FromSeconds(seconds)));
+        output.Play();
+
+        var stopwatch = Stopwatch.StartNew();
+        while (output.PlaybackState == PlaybackState.Playing && stopwatch.Elapsed.TotalSeconds < seconds + 3)
+        {
+            Thread.Sleep(50);
+        }
+
+        output.Stop();
+        _output.WriteLine($"Played {frequency} Hz for {stopwatch.Elapsed.TotalSeconds:F2} s while recording.");
+    }
+
     private static double Goertzel(IReadOnlyList<float> samples, double frequency)
     {
         if (samples.Count == 0)

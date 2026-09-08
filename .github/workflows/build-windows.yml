@@ -323,7 +323,7 @@ jobs:
           dotnet test tests/MeetingRecorder.Audio.Tests/MeetingRecorder.Audio.Tests.csproj `
             --configuration Release `
             --no-build `
-            --filter "FullyQualifiedName~LoopbackCaptureTests" `
+            --filter "FullyQualifiedName~LoopbackCaptureTests|FullyQualifiedName~RealDeviceRecordingTests" `
             --logger "console;verbosity=detailed"
 
           if ($env:MEETINGRECORDER_REQUIRE_LOOPBACK -ne "1") {
@@ -451,6 +451,66 @@ jobs:
           }
 
           Write-Host "The packaged executable ran $($report.checks.Count) self-checks. Overall: $($report.overall)"
+
+      - name: Run the packaged self-diagnosis with audio actually playing
+        # The step above runs the shipped binary but skips its capture probe,
+        # because with no endpoints there is nothing to listen to. Here there is:
+        # a tone is played while the same binary listens, so D-04 and D-05 - the
+        # microphone and the WASAPI loopback probes a user runs on their own
+        # machine - are measured rather than skipped.
+        if: steps.virtual_audio.outputs.installed == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "${{ github.workspace }}/publish/${{ env.ARTIFACT_NAME }}/MeetingRecorder.exe"
+          $json = "${{ github.workspace }}/artifacts/diagnose-with-audio.json"
+          $audio = "${{ github.workspace }}/.test-audio/speech.wav"
+
+          if (-not (Test-Path $audio)) {
+            Write-Host "::warning::No synthesised audio to play; skipping the capture probe check."
+            exit 0
+          }
+
+          # SoundPlayer plays through the default render endpoint, which is the
+          # endpoint the loopback probe listens to.
+          Add-Type -AssemblyName System.Windows.Forms
+          $player = New-Object System.Media.SoundPlayer($audio)
+          $player.PlayLooping()
+
+          try {
+            $process = Start-Process -FilePath $exe `
+              -ArgumentList '--diagnose', '--seconds', '6', '--json', $json `
+              -NoNewWindow -Wait -PassThru `
+              -RedirectStandardOutput "${{ github.workspace }}/artifacts/diagnose-with-audio.txt" `
+              -RedirectStandardError  "${{ github.workspace }}/artifacts/diagnose-with-audio.err"
+          }
+          finally {
+            $player.Stop()
+          }
+
+          Write-Host "--- diagnose stdout ---"
+          Get-Content "${{ github.workspace }}/artifacts/diagnose-with-audio.txt" | Write-Host
+          Write-Host "--- exit code: $($process.ExitCode) ---"
+
+          $report = Get-Content $json -Raw | ConvertFrom-Json
+          $loopback = $report.checks | Where-Object { $_.id -eq "D-05" }
+          $microphone = $report.checks | Where-Object { $_.id -eq "D-04" }
+
+          if (-not $loopback) {
+            throw "The report contains no D-05 check; the capture probe did not run."
+          }
+
+          Write-Host "D-04: $($microphone.status) - $($microphone.detail)"
+          Write-Host "D-05: $($loopback.status) - $($loopback.detail)"
+
+          # D-05 is the product's core claim: the shipped binary opened a render
+          # endpoint in loopback mode and received the audio the machine was
+          # playing. Anything other than Ok here means it did not.
+          if ($loopback.status -ne "Ok") {
+            throw "D-05 reported '$($loopback.status)' while audio was playing: $($loopback.detail)"
+          }
+
+          Write-Host "The shipped binary measured WASAPI loopback capture with audio playing."
 
       - name: Upload distribution artifact
         uses: actions/upload-artifact@v4
