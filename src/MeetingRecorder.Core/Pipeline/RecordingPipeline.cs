@@ -88,6 +88,16 @@ public sealed class RecordingPipeline : IDisposable
     private SpeechChunker? _micChunker;
     private SpeechChunker? _systemChunker;
 
+    // Recognition is fed from before the listening chain, so it needs its own
+    // DC blockers and its own copy of each block. See ProcessBlock.
+    private DcBlocker? _micRecognitionFilter;
+    private DcBlocker? _systemRecognitionFilter;
+    private float[] _micRecognitionBuffer = Array.Empty<float>();
+    private float[] _systemRecognitionBuffer = Array.Empty<float>();
+
+    private volatile bool _microphoneMuted;
+    private volatile bool _systemAudioMuted;
+
     private IAudioCaptureSource? _micSource;
     private IAudioCaptureSource? _systemSource;
     private IAudioFileWriter? _writer;
@@ -121,6 +131,58 @@ public sealed class RecordingPipeline : IDisposable
     }
 
     public TranscriptStore Transcript { get; }
+
+    /// <summary>
+    /// Silences the microphone leg without stopping it. Can be changed while
+    /// recording.
+    /// </summary>
+    /// <remarks>
+    /// Muting zeroes the audio in the pump rather than closing the endpoint. The
+    /// stream therefore keeps flowing, the timeline keeps advancing at wall-clock
+    /// rate, and un-muting takes effect on the very next block instead of paying
+    /// for a device restart. Nothing muted reaches the file, the meters or the
+    /// transcript.
+    /// </remarks>
+    public bool MicrophoneMuted
+    {
+        get => _microphoneMuted;
+        set
+        {
+            if (_microphoneMuted == value)
+            {
+                return;
+            }
+
+            _microphoneMuted = value;
+            if (value)
+            {
+                _micMeter.Reset();
+            }
+
+            _logger.Info(nameof(RecordingPipeline), value ? "Microphone muted." : "Microphone un-muted.");
+        }
+    }
+
+    /// <summary>Silences the PC-audio leg without stopping it.</summary>
+    public bool SystemAudioMuted
+    {
+        get => _systemAudioMuted;
+        set
+        {
+            if (_systemAudioMuted == value)
+            {
+                return;
+            }
+
+            _systemAudioMuted = value;
+            if (value)
+            {
+                _systemMeter.Reset();
+            }
+
+            _logger.Info(nameof(RecordingPipeline), value ? "PC audio muted." : "PC audio un-muted.");
+        }
+    }
 
     public RecordingState State => _state;
 
@@ -184,6 +246,10 @@ public sealed class RecordingPipeline : IDisposable
         _mixer = new StreamMixer(_options.Processing, rate);
         _micToStt = new Resampler(rate, SpeechConstants.SampleRate);
         _systemToStt = new Resampler(rate, SpeechConstants.SampleRate);
+        _micRecognitionFilter = new DcBlocker(rate);
+        _systemRecognitionFilter = new DcBlocker(rate);
+        _microphoneMuted = settings.MicrophoneMuted;
+        _systemAudioMuted = settings.SystemAudioMuted;
         _micChunker = new SpeechChunker(AudioSourceKind.Microphone, _options.Profile.ChunkSeconds, overlapMs: _options.Profile.ChunkOverlapMs);
         _systemChunker = new SpeechChunker(AudioSourceKind.SystemAudio, _options.Profile.ChunkSeconds, overlapMs: _options.Profile.ChunkOverlapMs);
 
@@ -382,13 +448,25 @@ public sealed class RecordingPipeline : IDisposable
 
     private void OnMicData(ReadOnlySpan<float> samples)
     {
-        _micMeter.Update(samples);
+        // While muted the meter must read silence: a moving bar next to a muted
+        // stream tells the user their voice is being recorded when it is not.
+        // The samples still enter the ring so the drift compensator keeps seeing
+        // a healthy stream; the pump is where they are actually discarded.
+        if (!_microphoneMuted)
+        {
+            _micMeter.Update(samples);
+        }
+
         _micRing?.Write(samples);
     }
 
     private void OnSystemData(ReadOnlySpan<float> samples)
     {
-        _systemMeter.Update(samples);
+        if (!_systemAudioMuted)
+        {
+            _systemMeter.Update(samples);
+        }
+
         _systemRing?.Write(samples);
     }
 
@@ -458,6 +536,37 @@ public sealed class RecordingPipeline : IDisposable
         FillStream(_micRing, mic, _micDrift!, tickSeconds, ref _micSilenceSeconds, rate);
         FillStream(_systemRing, system, _systemDrift!, tickSeconds, ref _systemSilenceSeconds, rate);
 
+        // Muting happens here, before anything reads the audio, so a muted leg
+        // reaches neither the file nor the transcript - while the block itself is
+        // still produced, keeping the timeline on the wall clock.
+        if (_microphoneMuted)
+        {
+            mic.Clear();
+        }
+
+        if (_systemAudioMuted)
+        {
+            system.Clear();
+        }
+
+        // Recognition is fed from HERE, before the listening chain, and the two
+        // paths diverge for a reason. The gate, the loudness normalizer, the
+        // compressor and the limiter exist to make a recording pleasant for a
+        // human ear: they attenuate quiet passages and reshape level non-linearly.
+        // Whisper's features are computed from exactly that shape, so running
+        // speech through them first is a measurable accuracy loss - worst on the
+        // quiet, conversational speech this product is for. Recognition gets the
+        // captured audio with only DC offset removed; the file still gets the
+        // full chain.
+        var micForRecognition = ReadOnlySpan<float>.Empty;
+        var systemForRecognition = ReadOnlySpan<float>.Empty;
+
+        if (_scheduler is not null)
+        {
+            micForRecognition = CopyForRecognition(mic, ref _micRecognitionBuffer, _micRecognitionFilter!);
+            systemForRecognition = CopyForRecognition(system, ref _systemRecognitionBuffer, _systemRecognitionFilter!);
+        }
+
         _micChain!.Process(mic);
         _systemChain!.Process(system);
 
@@ -466,10 +575,28 @@ public sealed class RecordingPipeline : IDisposable
 
         if (_scheduler is not null)
         {
-            FeedTranscription(_micChunker!, _micToStt!, mic, sttScratch);
-            FeedTranscription(_systemChunker!, _systemToStt!, system, sttScratch);
+            FeedTranscription(_micChunker!, _micToStt!, micForRecognition, sttScratch);
+            FeedTranscription(_systemChunker!, _systemToStt!, systemForRecognition, sttScratch);
             _scheduler.ReportRecordingPosition((long)(_writer.DurationSeconds * 1000));
         }
+    }
+
+    /// <summary>
+    /// Takes the recognition path's own copy of a block and removes any DC
+    /// offset, which a sound card can add and which costs the model nothing to
+    /// be rid of.
+    /// </summary>
+    private static ReadOnlySpan<float> CopyForRecognition(ReadOnlySpan<float> source, ref float[] buffer, DcBlocker filter)
+    {
+        if (buffer.Length < source.Length)
+        {
+            buffer = new float[source.Length];
+        }
+
+        var destination = buffer.AsSpan(0, source.Length);
+        source.CopyTo(destination);
+        filter.Process(destination);
+        return destination;
     }
 
     private void FillStream(

@@ -1,4 +1,5 @@
 using MeetingRecorder.Core.Audio;
+using MeetingRecorder.Core.Dsp;
 using MeetingRecorder.Core.Models;
 using MeetingRecorder.Core.Stt;
 
@@ -196,11 +197,20 @@ public sealed class FakeSpeechRecognizer : ISpeechRecognizer
 
     public List<int> ReceivedSampleCounts { get; } = new();
 
+    /// <summary>
+    /// Level of each chunk handed to the recognizer, in dBFS. This is how a test
+    /// can tell what the recognition path actually receives, as opposed to what
+    /// ends up in the file.
+    /// </summary>
+    public List<double> ReceivedRmsDb { get; } = new();
+
     public IReadOnlyList<RecognizedSpan> Transcribe(ReadOnlySpan<float> samples, string language, CancellationToken cancellationToken)
     {
+        var rms = AudioMath.RmsDb(samples);
         lock (ReceivedSampleCounts)
         {
             ReceivedSampleCounts.Add(samples.Length);
+            ReceivedRmsDb.Add(rms);
         }
 
         if (_delay > TimeSpan.Zero)

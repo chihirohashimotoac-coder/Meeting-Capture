@@ -31,6 +31,19 @@ public sealed class AppSettings
     /// <summary>Follow the Windows default device when the user switches it mid-meeting.</summary>
     public bool FollowDefaultDevices { get; set; } = true;
 
+    /// <summary>
+    /// Start recordings with the microphone silenced. Recording PC audio only.
+    /// </summary>
+    /// <remarks>
+    /// Persisted deliberately: someone who records webinars never wants the room
+    /// microphone, and having to remember the toggle every meeting is how a
+    /// private conversation ends up in a file.
+    /// </remarks>
+    public bool MicrophoneMuted { get; set; }
+
+    /// <summary>Start recordings with PC audio silenced. Recording the microphone only.</summary>
+    public bool SystemAudioMuted { get; set; }
+
     // ---- Output ----------------------------------------------------------
 
     /// <summary>Root folder that receives one sub-folder per meeting.</summary>
@@ -77,6 +90,20 @@ public sealed class AppSettings
     // ---- Behaviour -------------------------------------------------------
 
     public bool PreventSleepWhileRecording { get; set; } = true;
+
+    /// <summary>
+    /// When true a finished recording is kept in its meeting folder
+    /// automatically. When false it stays in the working folder until the user
+    /// exports it, and is offered for deletion when the app closes.
+    /// </summary>
+    /// <remarks>
+    /// Turning this off never means "do not write to disk". Audio is always
+    /// streamed to a working file, because holding an hour of a meeting in RAM
+    /// would lose everything to one crash - the exact failure the recovery
+    /// journal exists to prevent. What the switch controls is whether the result
+    /// is filed away automatically or waits for the user to say where it goes.
+    /// </remarks>
+    public bool AutoSaveRecordings { get; set; } = true;
 
     /// <summary>How often the recovery journal is flushed to disk.</summary>
     public int AutoSaveIntervalSeconds { get; set; } = 15;

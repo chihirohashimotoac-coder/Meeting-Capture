@@ -73,6 +73,163 @@ public sealed class PipelineTests : IDisposable
     }
 
     [Fact]
+    public void MutingTheMicrophoneRecordsPcAudioOnly()
+    {
+        var factory = new FakeCaptureFactory(
+            SignalGenerator.Sine(220, 1.0, 48000, 0.35),
+            SignalGenerator.Sine(660, 1.0, 48000, 0.35));
+
+        var recognizer = new FakeSpeechRecognizer();
+        var transcript = new TranscriptStore();
+
+        using var pipeline = new RecordingPipeline(
+            new RecordingPipelineOptions { Profile = new PerformanceProfile { ChunkSeconds = 1.0 } },
+            factory,
+            transcript);
+
+        var settings = CreateSettings();
+        settings.MicrophoneMuted = true;
+
+        var path = Path.Combine(_root, "pc-only.wav");
+        pipeline.Start(path, settings, recognizer, null, Path.Combine(_root, "spill"));
+
+        Assert.True(pipeline.MicrophoneMuted);
+        Thread.Sleep(2500);
+        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+
+        // The recording still runs for the full wall-clock time - muting one leg
+        // must not shorten the meeting.
+        Assert.InRange(result.Duration.TotalSeconds, 2.0, 3.5);
+
+        using var reader = new WavFileReader(path);
+        Assert.True(AudioMath.Rms(reader.ReadAllMono()) > 0.02, "PC audio should still be recorded");
+
+        // Nothing from the muted leg may reach the transcript either.
+        var segments = transcript.Snapshot();
+        Assert.NotEmpty(segments);
+        Assert.All(segments, segment => Assert.Equal(AudioSourceKind.SystemAudio, segment.Source));
+    }
+
+    [Fact]
+    public void MutingBothStreamsStillProducesACorrectlyTimedSilentFile()
+    {
+        var factory = new FakeCaptureFactory(
+            SignalGenerator.Sine(220, 1.0, 48000, 0.4),
+            SignalGenerator.Sine(660, 1.0, 48000, 0.4));
+
+        using var pipeline = new RecordingPipeline(
+            new RecordingPipelineOptions { TranscriptionEnabled = false },
+            factory,
+            new TranscriptStore());
+
+        var settings = CreateSettings();
+        settings.MicrophoneMuted = true;
+        settings.SystemAudioMuted = true;
+
+        var path = Path.Combine(_root, "both-muted.wav");
+        pipeline.Start(path, settings, null, null, Path.Combine(_root, "spill"));
+
+        Thread.Sleep(1500);
+        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+
+        // Muting everything is a user's choice, not an error: the timeline stays
+        // honest and the file is silence rather than a truncated recording.
+        Assert.InRange(result.Duration.TotalSeconds, 1.0, 2.5);
+
+        using var reader = new WavFileReader(path);
+        var audio = reader.ReadAllMono();
+        Assert.InRange(reader.DurationSeconds, 1.0, 2.5);
+        Assert.True(AudioMath.Peak(audio) < 0.001, "a fully muted recording must be silent");
+    }
+
+    [Fact]
+    public void MuteCanBeToggledWhileRecordingAndTakesEffectImmediately()
+    {
+        var factory = new FakeCaptureFactory(
+            SignalGenerator.Sine(220, 1.0, 48000, 0.4),
+            SignalGenerator.Silence(1.0, 48000));
+
+        using var pipeline = new RecordingPipeline(
+            new RecordingPipelineOptions { TranscriptionEnabled = false },
+            factory,
+            new TranscriptStore());
+
+        var path = Path.Combine(_root, "toggled.wav");
+        pipeline.Start(path, CreateSettings(), null, null, Path.Combine(_root, "spill"));
+
+        Thread.Sleep(1200);
+        pipeline.MicrophoneMuted = true;
+        Thread.Sleep(1200);
+
+        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+        Assert.True(pipeline.MicrophoneMuted);
+
+        using var reader = new WavFileReader(path);
+        var audio = reader.ReadAllMono();
+        var half = audio.Length / 2;
+
+        // Loud first half, silent second half: the toggle took effect during the
+        // recording rather than at the next start.
+        Assert.True(AudioMath.Rms(audio.AsSpan(0, half)) > 0.02, "the first half should contain the microphone");
+        Assert.True(AudioMath.Peak(audio.AsSpan(half)) < 0.01, "the second half should be silent after muting");
+    }
+
+    [Fact]
+    public void RecognitionReceivesTheCapturedAudioRatherThanTheProcessedMix()
+    {
+        // The listening chain gates, normalizes, compresses and limits - right for
+        // a human ear, wrong for the recognizer, which reads the spectral shape
+        // those stages reshape. This feeds a signal well above the normalizer's
+        // -20 dBFS target so the chain has to pull it down hard, then checks what
+        // each side ended up with. A loud tone rather than a quiet one because the
+        // VAD needs to fire for any audio to reach the recognizer at all.
+        const double loudAmplitude = 0.9; // about -3.9 dBFS RMS for a sine
+        const double sourceLevelDb = -3.9;
+
+        var factory = new FakeCaptureFactory(
+            SignalGenerator.Sine(220, 1.0, 48000, loudAmplitude),
+            SignalGenerator.Silence(1.0, 48000));
+
+        var recognizer = new FakeSpeechRecognizer();
+
+        using var pipeline = new RecordingPipeline(
+            new RecordingPipelineOptions { Profile = new PerformanceProfile { ChunkSeconds = 1.0 } },
+            factory,
+            new TranscriptStore());
+
+        var path = Path.Combine(_root, "quiet.wav");
+        pipeline.Start(path, CreateSettings(), recognizer, null, Path.Combine(_root, "spill"));
+
+        Thread.Sleep(3000);
+        pipeline.Stop(TimeSpan.FromSeconds(10));
+
+        double[] received;
+        lock (recognizer.ReceivedSampleCounts)
+        {
+            received = recognizer.ReceivedRmsDb.ToArray();
+        }
+
+        Assert.NotEmpty(received);
+        var recognizerLevel = received.Max();
+
+        using var reader = new WavFileReader(path);
+        var fileLevel = AudioMath.LinearToDb(AudioMath.Rms(reader.ReadAllMono()));
+
+        // The recognizer sees the audio as captured: had it come through the
+        // chain, it could not still be sitting at the source level.
+        Assert.True(
+            Math.Abs(recognizerLevel - sourceLevelDb) < 1.5,
+            $"the recognizer should see the captured level ({sourceLevelDb:F1} dBFS) "
+            + $"but saw {recognizerLevel:F1} dBFS");
+
+        // The file, meanwhile, has been pulled down towards the listening target.
+        Assert.True(
+            fileLevel < recognizerLevel - 8.0,
+            $"the recorded file ({fileLevel:F1} dBFS) should be well below the captured level, "
+            + $"otherwise the two paths are not actually separate");
+    }
+
+    [Fact]
     public void RecordingContinuesWithOnlyOneStreamWhenTheOtherDeviceIsUnavailable()
     {
         var factory = new FakeCaptureFactory(failSystem: true);
