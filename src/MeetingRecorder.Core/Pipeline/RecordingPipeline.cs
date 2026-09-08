@@ -252,10 +252,97 @@ public sealed class RecordingPipeline : IDisposable
         _state = RecordingState.Recording;
         _pump.Start();
 
-        _micSource?.Start();
-        _systemSource?.Start();
+        // Opening a stream can fail even though the endpoint resolved a moment
+        // ago. The common case is Windows privacy settings: the microphone
+        // enumerates normally and then denies access with E_ACCESSDENIED here,
+        // when the audio client is initialised. One dead stream must never cost
+        // the user the other, so a failure at this point drops that leg and the
+        // recording carries on with whatever still works.
+        if (!TryStartSource(_micSource, AudioSourceKind.Microphone))
+        {
+            _micSource = null;
+        }
+
+        if (!TryStartSource(_systemSource, AudioSourceKind.SystemAudio))
+        {
+            _systemSource = null;
+        }
+
+        if (_micSource is null && _systemSource is null)
+        {
+            AbortStart();
+            throw new InvalidOperationException(
+                "マイクとPC内部音声のどちらも録音を開始できませんでした。"
+                + "Windowsの「設定 > プライバシーとセキュリティ > マイク」でデスクトップアプリのマイク使用が"
+                + "許可されているか、再生デバイスが有効かを確認してください。");
+        }
 
         _logger.Info(nameof(RecordingPipeline), $"Recording started -> {audioFilePath}");
+    }
+
+    /// <summary>
+    /// Starts one capture leg, converting a failure into a warning rather than
+    /// into a lost recording.
+    /// </summary>
+    private bool TryStartSource(IAudioCaptureSource? source, AudioSourceKind kind)
+    {
+        if (source is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            source.Start();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            var label = kind == AudioSourceKind.Microphone ? "マイク" : "PC内部音声";
+            _logger.Error(nameof(RecordingPipeline), $"{kind} capture could not be started.", ex);
+
+            // An access denial has a specific remedy, and saying so is the
+            // difference between a user fixing it and giving up.
+            var remedy = ex is UnauthorizedAccessException && kind == AudioSourceKind.Microphone
+                ? "「設定 > プライバシーとセキュリティ > マイク」でデスクトップアプリのマイク使用を許可してください。"
+                : "もう一方の音声のみ録音します。";
+
+            AddWarning($"{label}の録音を開始できませんでした（{ex.Message}）。{remedy}");
+            Fault?.Invoke(this, new CaptureFault(
+                CaptureFaultKind.Unknown, $"{label}の録音を開始できませんでした: {ex.Message}", false));
+
+            try
+            {
+                source.Dispose();
+            }
+            catch (Exception disposeError)
+            {
+                _logger.Warn(nameof(RecordingPipeline), $"Disposing the failed {kind} source reported: {disposeError.Message}");
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>Unwinds a start that could not produce a single working stream.</summary>
+    private void AbortStart()
+    {
+        _cts?.Cancel();
+        _pump?.Join(TimeSpan.FromSeconds(2));
+
+        try
+        {
+            _writer?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn(nameof(RecordingPipeline), $"Discarding the audio file after a failed start reported: {ex.Message}");
+        }
+
+        _writer = null;
+        _scheduler?.DrainAndStop(TimeSpan.FromSeconds(1));
+        _sleepPreventer.Restore();
+        _state = RecordingState.Faulted;
     }
 
     private IAudioCaptureSource? TryCreateSource(Func<IAudioCaptureSource> factory, AudioSourceKind kind)

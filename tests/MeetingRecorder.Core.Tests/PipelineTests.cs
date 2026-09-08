@@ -97,6 +97,58 @@ public sealed class PipelineTests : IDisposable
     }
 
     [Fact]
+    public void RecordingContinuesWhenTheMicrophoneEnumeratesButThenRefusesToOpen()
+    {
+        // Found on a real Windows machine: with microphone access denied in the
+        // privacy settings the endpoint still enumerates, and WASAPI only fails
+        // when the audio client is initialised - after the pipeline has decided
+        // both legs exist. Before this was handled, that single access denial
+        // took the whole recording down and the PC audio was lost with it.
+        var factory = new FakeCaptureFactory(
+            microphoneStartFailure: new UnauthorizedAccessException("Access is denied. (0x80070005 (E_ACCESSDENIED))"));
+
+        using var pipeline = new RecordingPipeline(
+            new RecordingPipelineOptions { TranscriptionEnabled = false },
+            factory,
+            new TranscriptStore());
+
+        var path = Path.Combine(_root, "denied-mic.wav");
+        pipeline.Start(path, CreateSettings(), null, null, Path.Combine(_root, "spill"));
+
+        Thread.Sleep(1200);
+        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+
+        Assert.True(result.Duration.TotalSeconds > 0.8, "PC audio must keep recording when the microphone is denied");
+        Assert.Contains(result.Warnings, w => w.Contains("マイク"));
+
+        // A denial has one specific remedy, and the warning has to name it.
+        Assert.Contains(result.Warnings, w => w.Contains("プライバシー"));
+
+        using var reader = new WavFileReader(path);
+        Assert.True(AudioMath.Rms(reader.ReadAllMono()) > 0.005, "the surviving stream should still be recorded");
+    }
+
+    [Fact]
+    public void RefusesToStartWhenBothStreamsEnumerateButNeitherWillOpen()
+    {
+        var factory = new FakeCaptureFactory(
+            microphoneStartFailure: new UnauthorizedAccessException("Access is denied."),
+            systemStartFailure: new InvalidOperationException("The endpoint is in use."));
+
+        using var pipeline = new RecordingPipeline(
+            new RecordingPipelineOptions { TranscriptionEnabled = false },
+            factory,
+            new TranscriptStore());
+
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            pipeline.Start(Path.Combine(_root, "neither.wav"), CreateSettings(), null, null, Path.Combine(_root, "spill")));
+
+        // Failing is correct here; failing without saying what to do is not.
+        Assert.Contains("プライバシー", error.Message);
+        Assert.Equal(RecordingState.Faulted, pipeline.State);
+    }
+
+    [Fact]
     public void RefusesToStartWhenNeitherStreamCanBeOpened()
     {
         var factory = new FakeCaptureFactory(failMicrophone: true, failSystem: true);
