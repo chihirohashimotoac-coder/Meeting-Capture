@@ -1,11 +1,11 @@
 # TEST_RESULTS.md — テスト結果
 
-最終更新: 2026-09-07 / 対象ブランチ: `claude/windows-meeting-recorder-app-slkq27`
+最終更新: 2026-09-08 / 対象ブランチ: `claude/windows-meeting-recorder-app-slkq27`
 
-自動テスト合計 **169 件**（Core 135 / Stt 13 / App 10 / Audio 11）。すべて GitHub Actions の
+自動テスト合計 **183 件**（Core 149 / Stt 13 / App 10 / Audio 11）。すべて GitHub Actions の
 `windows-latest` 上で成功しています（実行記録:
-[run #39](https://github.com/chihirohashimotoac-coder/Meeting-Capture/actions/runs/34172840832)、
-commit `5a9563e`）。
+[run #49](https://github.com/chihirohashimotoac-coder/Meeting-Capture/actions/runs/34178525658)、
+commit `4015870`）。
 
 このうち **3 件は実際の音声デバイスを開いて実測**します（2.11）。CI では
 サウンドカードの代役として仮想オーディオデバイスを導入しており、
@@ -52,7 +52,7 @@ commit `5a9563e`）。
 | --- | --- | --- | --- |
 | ソリューション全体の restore | GitHub Actions / windows-latest | PASS | 10 プロジェクト |
 | Release ビルド（全プロジェクト） | GitHub Actions / windows-latest | PASS | WPF アプリを含む |
-| `MeetingRecorder.Core.Tests`（135 件） | GitHub Actions / windows-latest | PASS | DSP・永続化・パイプライン・話者分離・議事録 |
+| `MeetingRecorder.Core.Tests`（149 件） | GitHub Actions / windows-latest | PASS | DSP・永続化・パイプライン・話者分離・議事録 |
 | `MeetingRecorder.Stt.Tests`（13 件） | GitHub Actions / windows-latest | PASS | モデルダウンロード整合性・認識器契約 |
 | `MeetingRecorder.Audio.Tests`（11 件） | GitHub Actions / windows-latest | PASS | うち 3 件は実オーディオデバイスを開いて実測（2.11） |
 | `MeetingRecorder.App.Tests`（10 件） | GitHub Actions / windows-latest | PASS | 全ウィンドウの XAML ロード＋データバインド検証 |
@@ -74,6 +74,11 @@ commit `5a9563e`）。
 | **WASAPI ループバックによる実音声取得** | GitHub Actions / windows-latest | PASS | 再生したトーンを実際に取得（詳細は 2.11） |
 | **実デバイスを通した実録音** | GitHub Actions / windows-latest | PASS | 実 `RecordingPipeline` + 実 WASAPI で録音し、WAV を読み戻して検証（2.11） |
 | **配布バイナリによる D-05 実測** | GitHub Actions / windows-latest | PASS | 音を再生しながら `--diagnose --seconds 6` を実行し、D-05 が Ok でなければビルド失敗 |
+| ミュート（片系統・両系統・録音中の切替） | GitHub Actions / windows-latest | PASS | 無音になること、タイムラインが壊れないこと、ミュート側が文字起こしに出ないことを検査 |
+| **認識器に渡す音声が DSP 前であること** | GitHub Actions / windows-latest | PASS | 正規化目標を超える信号で、認識器側は入力レベルのまま／ファイル側は 8 dB 以上低いことを検査 |
+| 2パス（確定版）の窓・時刻・発言元 | GitHub Actions / windows-latest | PASS | 窓が 10 秒超かつ 30 秒以下、時刻が会議先頭からの絶対値、系統別ファイル由来の発言元を維持 |
+| 確定版が話者名を引き継ぐこと | GitHub Actions / windows-latest | PASS | 別系統の名前を誤って適用しないことも検査 |
+| 系統別認識音声の保存 | GitHub Actions / windows-latest | PASS | 16 kHz で書かれること、無効時には 1 バイトも書かないことを検査 |
 
 ---
 
@@ -519,6 +524,8 @@ CI の仮想エンドポイント上では実測済み**です。それでも下
 | 実機での性能実測 | 未実施。`ProfileSelector` の RTF 推定値は基準機の想定値であり、実測で較正されていません（実行中の実測 RTF による自動劣化は実装済み） |
 | 話者分離の精度評価 | 未実施。合成音声での分離のみ確認しています |
 | 日本語での認識精度 | 未実施。CI で確認できたのは**英語の合成音声**までです（2.9）。日本語は T-23 |
+| **精度改善の効果量** | **未測定。**認識経路の修正・日本語プロンプト・2パス方式はいずれも原理的な改善ですが、**日本語の実会議でどれだけ良くなるかは実測していません。**同条件で録り直して比較する以外に確認手段がありません |
+| 確定版の所要時間 | 未測定。1時間の録音に対する実処理時間は実機でのみ分かります |
 | 実サウンドカードでの動作 | **2026-09-08 に確認済み**（2.13）。Realtek 環境 1 台のみで、他のオーディオチップ・Bluetooth 機器での挙動は未確認です |
 | マイクとPC音声の同時録音 | 未実演。CI ではマイク側が権限拒否、実機診断でも D-04 と D-05 は順番に実行されるため、**2 系統が同時に開かれた状態は未測定**です（T-15） |
 | コード署名の代替 | 未実施。配布 ZIP の SHA-256 は Actions のログから取得できますが、リリースに署名は付いていません |
