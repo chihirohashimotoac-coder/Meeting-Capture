@@ -640,7 +640,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             RefinementProgress = p.Fraction;
             RefinementStatus =
                 $"高精度で文字起こしをやり直しています... {p.Fraction * 100:F0}%"
-                + $"（{TimeSpan.FromSeconds(p.ProcessedSeconds):mm\:ss} / {TimeSpan.FromSeconds(p.TotalSeconds):mm\:ss}）";
+                + $"（{TimeSpan.FromSeconds(p.ProcessedSeconds):mm\\:ss} / {TimeSpan.FromSeconds(p.TotalSeconds):mm\\:ss}）";
         });
 
         try
