@@ -211,6 +211,125 @@ jobs:
           --filter "FullyQualifiedName~RealModelRecognitionTests"
           --logger "console;verbosity=detailed"
 
+      - name: Install a virtual audio endpoint (CI fixture only)
+        id: virtual_audio
+        # A GitHub-hosted Windows runner has no sound card at all, which is why
+        # every audio assertion so far has amounted to "the call did not throw".
+        # This installs a virtual audio device so the next step can play a tone
+        # and check that the product's own WASAPI loopback source really
+        # captures it.
+        #
+        # This is a stand-in for a speaker, in CI only. The application neither
+        # needs nor uses a virtual audio driver - that is an explicit
+        # requirement - and nothing installed here is shipped or referenced by
+        # the application. The recorder still captures whatever render endpoint
+        # Windows reports as the default; here that endpoint happens to be
+        # virtual.
+        #
+        # continue-on-error: if this fails the build carries on and the next
+        # step reports loopback capture as untested. It must never turn into a
+        # claim that audio was verified.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $installed = $false
+
+          try {
+            Start-Service -Name audiosrv -ErrorAction SilentlyContinue
+            $service = Get-Service -Name audiosrv -ErrorAction SilentlyContinue
+            Write-Host "Windows Audio service: $($service.Status)"
+
+            $work = Join-Path $env:RUNNER_TEMP "virtual-audio"
+            New-Item -ItemType Directory -Force -Path $work | Out-Null
+            $zip = Join-Path $work "cable.zip"
+
+            $sources = @(
+              "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip",
+              "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip"
+            )
+
+            $downloaded = $false
+            foreach ($url in $sources) {
+              try {
+                Write-Host "Fetching $url"
+                Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 180
+                $downloaded = $true
+                $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+                Write-Host ("  {0:N0} bytes, SHA-256 {1}" -f (Get-Item $zip).Length, $hash)
+                break
+              } catch {
+                Write-Host "  not available: $($_.Exception.Message)"
+              }
+            }
+
+            if (-not $downloaded) { throw "No virtual audio driver package could be downloaded." }
+
+            Expand-Archive -Path $zip -DestinationPath $work -Force
+            Get-ChildItem $work -Recurse -File | ForEach-Object { Write-Host "  $($_.Name)" }
+
+            # Pre-trusting the publisher is what makes the install non-interactive;
+            # without it Windows waits for a dialog nobody is there to click.
+            foreach ($cat in Get-ChildItem $work -Recurse -Filter *.cat) {
+              $signature = Get-AuthenticodeSignature $cat.FullName
+              if ($signature.SignerCertificate) {
+                $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPublisher", "LocalMachine")
+                $store.Open("ReadWrite")
+                $store.Add($signature.SignerCertificate)
+                $store.Close()
+                Write-Host "Trusted publisher: $($signature.SignerCertificate.Subject)"
+                break
+              }
+            }
+
+            $setup = Get-ChildItem $work -Recurse -Filter "VBCABLE_Setup_x64.exe" | Select-Object -First 1
+            if (-not $setup) { throw "The package did not contain the expected setup program." }
+
+            $process = Start-Process -FilePath $setup.FullName -ArgumentList "-i", "-h" -Wait -PassThru
+            Write-Host "Setup exit code: $($process.ExitCode)"
+
+            # The audio endpoint appears a moment after the device node does.
+            for ($i = 0; $i -lt 15; $i++) {
+              $media = @(Get-PnpDevice -Class MEDIA -Status OK -ErrorAction SilentlyContinue)
+              if ($media.Count -gt 0) { break }
+              Start-Sleep -Seconds 2
+            }
+
+            $media = @(Get-PnpDevice -Class MEDIA -Status OK -ErrorAction SilentlyContinue)
+            if ($media.Count -gt 0) {
+              $media | Format-Table -AutoSize Status, Class, FriendlyName | Out-String | Write-Host
+            }
+            $installed = $media.Count -gt 0
+          }
+          catch {
+            Write-Host "::warning::Could not install a virtual audio endpoint: $($_.Exception.Message)"
+          }
+
+          "installed=$($installed.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          if ($installed) {
+            Write-Host "A virtual audio endpoint is present; loopback capture will be exercised for real."
+          } else {
+            Write-Host "::warning::No virtual audio endpoint; WASAPI loopback capture stays untested in this build."
+          }
+
+      - name: Verify WASAPI loopback captures what Windows is playing
+        env:
+          # 1 turns "no render endpoint, skip" into a failure, so a broken
+          # fixture cannot silently disable the check.
+          MEETINGRECORDER_REQUIRE_LOOPBACK: ${{ steps.virtual_audio.outputs.installed == 'true' && '1' || '0' }}
+        shell: pwsh
+        run: |
+          dotnet test tests/MeetingRecorder.Audio.Tests/MeetingRecorder.Audio.Tests.csproj `
+            --configuration Release `
+            --no-build `
+            --filter "FullyQualifiedName~LoopbackCaptureTests" `
+            --logger "console;verbosity=detailed"
+
+          if ($env:MEETINGRECORDER_REQUIRE_LOOPBACK -ne "1") {
+            Write-Host "::warning::The loopback tests skipped: this runner had no audio endpoint. T-09 remains not tested."
+          }
+
       - name: Publish self-contained win-x64
         run: >
           dotnet publish src/MeetingRecorder.App/MeetingRecorder.App.csproj
