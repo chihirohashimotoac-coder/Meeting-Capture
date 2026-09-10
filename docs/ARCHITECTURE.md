@@ -199,7 +199,7 @@ output[n] = input[n] * gain                    （全サンプルに同じ gain�
 | `NormalizationTargetPeakDbFs` | **-1.0 dBFS** | PCM のサンプルピークは、DA変換や非可逆圧縮でサンプル間に再構成される真のピークと一致しない。ITU-R BS.1770-4 / EBU R 128 が同じ理由で -1 dBTP の余裕を推奨しており、同じ値を同じ理由で採る。16bit 量子化の丸めもここに吸収される |
 | `MaxNormalizationGainDb` | **+20.0 dB（= 10倍）** | これ以上増幅しても持ち上がるのは発話ではなく収録時のノイズフロア。ノイズを10倍より大きくしても会議は聞き取りやすくならない。ゲインを一定に保ったまま「大きくしすぎない」という制限であり、リミッターではない |
 | `NormalizationSkipThresholdDb` | 0.1 dB | 約1.2%。可聴でなく、16bit へ再量子化する価値もない差。この場合はファイルを書き直さないため、pump が書いたバイト列がそのまま残る |
-| `ClipDetectionThreshold` / `ClipDetectionSampleFraction` | 0.999 / 0.0001 | 1時間の録音で数サンプルがフルスケールに触れるのは偶然であって歪みではない。1万分の1（48kHz で毎時約1.6秒相当）は、狼少年にならず、かつ実際に過大入力された録音は捕捉できる境界 |
+| `ClipDetectionThreshold` / `ClipDetectionSampleFraction` | 0.999 / 0.0001 | 1時間の録音で数サンプルがフルスケールに触れるのは偶然であって歪みではない。1万分の1（サンプルレートによらず、1時間あたり 3600 × 0.0001 = 約0.36秒分のサンプル）は、狼少年にならず、かつ実際に過大入力された録音は捕捉できる境界 |
 
 **クリッピングはゲインを先に決めることで防ぎます。** サンプルループの中に閾値判定は
 存在せず、大きすぎた値を潰す段もありません（`AHotFileIsScaledDownRatherThanHavingItsPeaksFlattened`）。

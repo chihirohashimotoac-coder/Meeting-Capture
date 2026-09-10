@@ -126,9 +126,10 @@ public sealed class AudioProcessingSettings
     /// </summary>
     /// <remarks>
     /// A handful of samples touching full scale in an hour of audio is a
-    /// coincidence, not distortion. 0.0001 (one sample in ten thousand,
-    /// ~1.6 seconds' worth per hour at 48 kHz) is high enough not to cry wolf
-    /// and low enough to catch a genuinely over-driven input.
+    /// coincidence, not distortion. 0.0001 (one sample in ten thousand, which
+    /// is 3600 x 0.0001 = 0.36 seconds' worth per hour at any sample rate) is
+    /// high enough not to cry wolf and low enough to catch a genuinely
+    /// over-driven input.
     /// </remarks>
     public double ClipDetectionSampleFraction { get; set; } = 0.0001;
 
