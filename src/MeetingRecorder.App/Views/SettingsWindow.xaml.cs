@@ -179,9 +179,17 @@ public partial class SettingsWindow : Window
             ? string.Empty
             : $" このPCのRAM（{profile.TotalRamGb:F0}GB）では動作が不安定になる可能性があります。";
 
+        // Spelled out rather than formatted with a custom TimeSpan pattern:
+        // the Japanese unit characters would have to be escaped inside the
+        // pattern, and a plain calculation is easier to read and to be sure of.
+        var perHour = TimeSpan.FromHours(factor);
+        var duration = perHour.TotalHours >= 1
+            ? $"約 {(int)perHour.TotalHours} 時間 {perHour.Minutes} 分"
+            : $"約 {(int)perHour.TotalMinutes} 分";
+
         ModelEstimateText.Text =
             $"{descriptor.DisplayName} — {present} / 推定処理時間: 音声長の約 {factor:F1} 倍"
-            + $"（1時間の録音でおよそ {TimeSpan.FromHours(factor):h\時\間mm\分}。実測値ではなく推定です）。{memory}";
+            + $"（1時間の録音で{duration}。実測値ではなく推定です）。{memory}";
     }
 
     private void UpdateProfileText()
