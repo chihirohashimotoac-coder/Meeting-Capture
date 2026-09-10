@@ -100,17 +100,31 @@ public class RealModelRecognitionTests
         var audio = LoadAudioAt16k();
         var audioSeconds = audio.Length / (double)SpeechConstants.SampleRate;
 
+        // Reported so a candidate model can be judged on what it costs as well
+        // as on what it produces. These are this runner's numbers, not the
+        // reference laptop's, and anywhere they are quoted says so.
+        using var process = Process.GetCurrentProcess();
+        var modelBytes = new FileInfo(ModelPath!).Length;
+        var beforeLoad = process.WorkingSet64;
+
+        var loadClock = Stopwatch.StartNew();
         using var recognizer = new WhisperSpeechRecognizer(ModelPath!, "test-model", SpeechRecognitionOptions.Offline(2, Language));
+        loadClock.Stop();
         Assert.True(recognizer.IsReady);
 
         var stopwatch = Stopwatch.StartNew();
         var spans = recognizer.Transcribe(audio, Language, CancellationToken.None);
         stopwatch.Stop();
 
+        process.Refresh();
         var text = string.Join(" ", spans.Select(s => s.Text)).Trim();
         var realTimeFactor = stopwatch.Elapsed.TotalSeconds / Math.Max(0.001, audioSeconds);
 
-        _output.WriteLine($"Recognized {spans.Count} span(s) in {stopwatch.Elapsed.TotalSeconds:F2} s (RTF {realTimeFactor:F2}):");
+        _output.WriteLine($"Model file: {modelBytes / 1024.0 / 1024.0:F0} MB, loaded in {loadClock.Elapsed.TotalSeconds:F2} s");
+        _output.WriteLine(
+            $"Working set: {beforeLoad / 1024.0 / 1024.0:F0} MB before load -> "
+            + $"{process.WorkingSet64 / 1024.0 / 1024.0:F0} MB after, peak {process.PeakWorkingSet64 / 1024.0 / 1024.0:F0} MB");
+        _output.WriteLine($"Recognized {spans.Count} span(s) from {audioSeconds:F2} s of audio in {stopwatch.Elapsed.TotalSeconds:F2} s (RTF {realTimeFactor:F2}):");
         _output.WriteLine(text);
 
         Assert.NotEmpty(spans);
