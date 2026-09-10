@@ -337,7 +337,7 @@ public class RealDeviceRecordingTests
                 PreventSleepWhileRecording = false,
             };
 
-            using var pipeline = new RecordingPipeline(options, new WasapiCaptureFactory(), new TranscriptStore());
+            using var pipeline = new RecordingPipeline(options, new WasapiCaptureFactory());
 
             pipeline.Start(audioPath, settings, journal: null);
 

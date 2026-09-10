@@ -89,9 +89,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _transcript.SegmentChanged += OnSegmentChanged;
         _transcript.SegmentRemoved += OnSegmentRemoved;
 
-        StartCommand = new AsyncRelayCommand(StartRecordingAsync, () => !IsRecording && !IsBusy);
+        // Recording and transcribing are mutually exclusive, and the exclusion
+        // points both ways. Transcription is minutes of inference on every core
+        // this machine has; starting a recording underneath it would put exactly
+        // the load on the capture path that removing live transcription was
+        // meant to take off it.
+        StartCommand = new AsyncRelayCommand(StartRecordingAsync, () => !IsRecording && !IsTranscribing && !IsBusy);
         StopCommand = new AsyncRelayCommand(StopRecordingAsync, () => IsRecording && !IsBusy);
-        ImportAudioCommand = new AsyncRelayCommand(ImportAudioAsync, () => !IsRecording && !IsBusy);
+        ImportAudioCommand = new AsyncRelayCommand(ImportAudioAsync, () => !IsRecording && !IsTranscribing && !IsBusy);
         OpenSettingsCommand = new RelayCommand(OpenSettings, () => !IsRecording);
         OpenFolderCommand = new RelayCommand(OpenSaveFolder);
         TranscribeCommand = new AsyncRelayCommand(TranscribeAsync, CanTranscribe);
@@ -713,9 +718,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     /// This is the only place in the application that loads a speech model. It
     /// runs on a thread-pool thread over a file that is already closed, so
     /// nothing it does - not the model load, not the inference, not the speaker
-    /// clustering - can touch a recording. There is no recording while it runs:
-    /// <see cref="CanTranscribe"/> refuses to start one during capture, and
-    /// starting a recording is refused while this is running.
+    /// clustering - can touch a recording. There is no recording while it runs,
+    /// in both directions: <see cref="CanTranscribe"/> refuses to start this
+    /// during capture, and <c>StartCommand</c> refuses to start a recording
+    /// while this is running.
     /// </remarks>
     private async Task TranscribeAsync()
     {
@@ -728,7 +734,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        if (!meeting.CanTranscribe && !TryRebuildWorkingAudio(meeting))
+        if (!meeting.CanTranscribe && !await TryRebuildWorkingAudioAsync(meeting))
         {
             return;
         }
@@ -837,7 +843,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     /// Re-creates the working audio for an imported meeting whose copy was
     /// deleted after a previous transcription.
     /// </summary>
-    private bool TryRebuildWorkingAudio(MeetingSummary meeting)
+    private async Task<bool> TryRebuildWorkingAudioAsync(MeetingSummary meeting)
     {
         if (!CanRebuildWorkingAudio(meeting))
         {
@@ -853,8 +859,31 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return false;
         }
 
+        // Decoding an hour of audio is not instant, so it does not happen on the
+        // UI thread.
         StatusMessage = "元のファイルから作業用音声を作り直しています...";
-        if (_services.MeetingImporter.TryReimport(meeting, _services.Settings, out var reason))
+        IsBusy = true;
+
+        string? reason;
+        bool rebuilt;
+        try
+        {
+            var settings = _services.Settings;
+            var result = await Task.Run(() =>
+            {
+                var ok = _services.MeetingImporter.TryReimport(meeting, settings, out var failure);
+                return (Ok: ok, Failure: failure);
+            });
+
+            rebuilt = result.Ok;
+            reason = result.Failure;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+
+        if (rebuilt)
         {
             return true;
         }

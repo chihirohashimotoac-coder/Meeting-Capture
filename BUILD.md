@@ -75,9 +75,9 @@ dotnet test MeetingRecorder.sln --configuration Release --no-build
 
 | テストプロジェクト | 対象フレームワーク | 内容 |
 | --- | --- | --- |
-| `MeetingRecorder.Core.Tests` | net8.0 | DSP（リミッター・AGC・ゲート・リサンプラー・ドリフト補正）、WAV の耐クラッシュ性、VAD/チャンク化、STTキューの無損失性、永続化と復旧、合成キャプチャによる録音パイプラインのE2E、話者分離、議事録生成 |
-| `MeetingRecorder.Stt.Tests` | net8.0 | モデルダウンロードの整合性（SHA-256照合・レジューム・許可リスト外の拒否）、認識器の契約 |
-| `MeetingRecorder.Audio.Tests` | net8.0-windows | WASAPI エンドポイント列挙、デバイス不在時のエラーメッセージ、スリープ抑制、MP3エンコーダーの有無 |
+| `MeetingRecorder.Core.Tests` | net8.0 | 音声処理（**削除した段が存在しないことの検査**・固定ゲインの一定性・クリップ検出・リサンプラー・ドリフト補正）、WAV の耐クラッシュ性、VAD/窓分割、録音パイプラインのE2E（**録音中に認識器へ到達しないことを含む**）、音声インポート、作業音声の削除条件、設定の移行、話者分離、議事録生成 |
+| `MeetingRecorder.Stt.Tests` | net8.0 | モデルダウンロードの整合性（SHA-256照合・レジューム・許可リスト外の拒否）、認識器の契約、**実モデルでの認識**（環境変数でフィクスチャを指定したときのみ） |
+| `MeetingRecorder.Audio.Tests` | net8.0-windows | WASAPI エンドポイント列挙、デバイス不在時のエラーメッセージ、スリープ抑制、MP3エンコーダーの有無、**MP3 / M4A / AAC インポートの実コーデック検証** |
 | `MeetingRecorder.App.Tests` | net8.0-windows | 全ウィンドウの XAML ロードとデータバインド検証（STAスレッド上） |
 
 **Linux / macOS の場合**:
@@ -92,7 +92,7 @@ dotnet test tests/MeetingRecorder.Stt.Tests
 個別実行の例:
 
 ```powershell
-dotnet test tests/MeetingRecorder.Core.Tests --filter "LimiterTests"
+dotnet test tests/MeetingRecorder.Core.Tests --filter "PeakNormalizerTests"
 dotnet test MeetingRecorder.sln --logger "trx;LogFileName=test-results.trx" --results-directory TestResults
 ```
 
@@ -147,7 +147,13 @@ Compress-Archive -Path "$target/*" `
 | --- | --- | --- | --- |
 | Windows build | `.github/workflows/build-windows.yml` | 全ブランチへの push / PR / 手動 | restore → build → test → publish → 出力検証 → ZIP → Artifact `MeetingRecorder-win-x64` |
 | Release | `.github/workflows/release.yml` | タグ `v*` / 手動 | 同じ内容をビルドし、SHA-256 付きの **下書き** Release を作成 |
-| Verify model checksums | `.github/workflows/model-hashes.yml` | 手動 / 毎月 | `ModelCatalog` にピン留めした SHA-256 を実ファイルと照合 |
+| Verify model checksums | `.github/workflows/model-hashes.yml` | 手動 / 毎月 | `ModelCatalog` にピン留めした SHA-256 を実ファイルと照合。`measure` モードでは、カタログ未登録の候補モデルのサイズと SHA-256 を実測（新しいモデルを追加する前に使います） |
+
+`build-windows.yml` の手動実行では `evaluate_models` 入力に ggml ファイル名を
+渡せます。指定すると、そのモデルを実際にダウンロードして製品と同じデコード設定で
+推論させ、サイズ・SHA-256・読み込み時間・ワーキングセット・処理時間を出力します。
+**カタログにモデルを追加する前に、実際に動くことを確認するための入口です。**
+空（既定）のときは通常のビルドと変わりません。
 
 すべて `permissions: contents: read` を既定とし、
 `contents: write` は Release を作成するジョブにのみ付与しています。
@@ -176,7 +182,10 @@ Compress-Archive -Path "$target/*" `
 ```
 
 初回は設定ウィザードが開きます。文字起こしを試す場合は
-ウィザードまたは設定画面からモデルをダウンロードしてください。
+ウィザードまたは設定画面からモデルをダウンロードし、
+録音を停止してから（またはファイルをインポートしてから）
+「文字起こし」ボタンを押してください。**録音中および録音停止時に
+文字起こしが自動で始まることはありません。**
 
 **CI のグリーンは実機動作の確認ではありません。**
 実オーディオデバイスを伴う確認は `docs/WINDOWS_E2E_TEST.md` に従ってください。

@@ -114,25 +114,16 @@ public sealed class RecordingPipeline : IDisposable
     public RecordingPipeline(
         RecordingPipelineOptions options,
         IAudioCaptureFactory captureFactory,
-        TranscriptStore transcript,
         ISleepPreventer? sleepPreventer = null,
         ILogger? logger = null,
         Func<string, int, IAudioFileWriter>? writerFactory = null)
     {
         _options = options;
         _captureFactory = captureFactory;
-        Transcript = transcript;
         _sleepPreventer = sleepPreventer ?? new NullSleepPreventer();
         _logger = logger ?? NullLogger.Instance;
         _writerFactory = writerFactory ?? ((path, rate) => new WavFileWriter(path, rate));
     }
-
-    /// <summary>
-    /// The meeting's transcript. Empty while recording - nothing writes to it
-    /// until the user asks for a transcription - but owned here so that the
-    /// journal, and therefore crash recovery, covers whatever is in it.
-    /// </summary>
-    public TranscriptStore Transcript { get; }
 
     /// <summary>
     /// Silences the microphone leg without stopping it. Can be changed while
@@ -246,7 +237,6 @@ public sealed class RecordingPipeline : IDisposable
 
         var rate = _options.SampleRate;
         _journal = journal;
-        Transcript.AttachJournal(journal);
 
         _micRing = AudioRingBuffer.ForSeconds(rate, _options.RingBufferSeconds);
         _systemRing = AudioRingBuffer.ForSeconds(rate, _options.RingBufferSeconds);

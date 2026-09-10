@@ -50,8 +50,7 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Sine(220, 1.0, 48000, 0.3),
             SignalGenerator.Sine(880, 1.0, 48000, 0.3));
 
-        var transcript = new TranscriptStore();
-        using var pipeline = new RecordingPipeline(Options(), factory, transcript);
+        using var pipeline = new RecordingPipeline(Options(), factory);
 
         var path = Path.Combine(_root, "meeting.wav");
         pipeline.Start(path, CreateSettings(), null);
@@ -97,25 +96,17 @@ public sealed class PipelineTests : IDisposable
     }
 
     [Fact]
-    public void NoInferenceHappensDuringARecordingOrWhenItStops()
+    public void NothingInTheRecordingApiAcceptsARecognizerOrADiarizer()
     {
-        // A recognizer that fails the test if it is ever called. Recording an
-        // entire meeting and stopping it must not reach it once - not while
-        // capturing, and not on the way out either.
-        var recognizer = new ForbiddenRecognizer();
-        var factory = new FakeCaptureFactory();
-
-        using var manager = new MeetingSessionManager(factory);
-        var folder = manager.Start(CreateSettings(), "no-inference");
-        Thread.Sleep(1500);
-        var summary = manager.Stop();
-
-        Assert.Equal(0, recognizer.Calls);
-        Assert.Empty(manager.Transcript.Snapshot());
-
-        // Stopping produced audio and stopped there.
-        Assert.True(File.Exists(summary.AudioPath));
-        Assert.True(summary.CanTranscribe, "the working audio should be ready for a transcription the user asks for");
+        // The other half of the guarantee: not only does RecordingPipeline hold
+        // no recognizer, there is no way to hand one to the layer above it
+        // either. A recording is started with settings and a title.
+        foreach (var method in new[] { nameof(MeetingSessionManager.Start), nameof(MeetingSessionManager.Stop) })
+        {
+            var parameters = typeof(MeetingSessionManager).GetMethod(method)!.GetParameters();
+            Assert.DoesNotContain(parameters, p => typeof(ISpeechRecognizer).IsAssignableFrom(p.ParameterType));
+            Assert.DoesNotContain(parameters, p => typeof(ISpeakerDiarizer).IsAssignableFrom(p.ParameterType));
+        }
     }
 
     [Fact]
@@ -125,7 +116,7 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Sine(220, 1.0, 48000, 0.35),
             SignalGenerator.Sine(660, 1.0, 48000, 0.35));
 
-        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
+        using var pipeline = new RecordingPipeline(Options(), factory);
 
         var settings = CreateSettings();
         settings.MicrophoneMuted = true;
@@ -158,7 +149,7 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Sine(220, 1.0, 48000, 0.4),
             SignalGenerator.Sine(660, 1.0, 48000, 0.4));
 
-        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
+        using var pipeline = new RecordingPipeline(Options(), factory);
 
         var settings = CreateSettings();
         settings.MicrophoneMuted = true;
@@ -187,7 +178,7 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Sine(220, 1.0, 48000, 0.4),
             SignalGenerator.Silence(1.0, 48000));
 
-        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
+        using var pipeline = new RecordingPipeline(Options(), factory);
 
         var path = Path.Combine(_root, "toggled.wav");
         pipeline.Start(path, CreateSettings(), null);
@@ -222,7 +213,7 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Sine(220, 1.0, 48000, amplitude),
             SignalGenerator.Silence(1.0, 48000));
 
-        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
+        using var pipeline = new RecordingPipeline(Options(), factory);
 
         var recognitionDirectory = Path.Combine(_root, "fidelity");
         pipeline.Start(Path.Combine(_root, "fidelity.wav"), CreateSettings(), null, recognitionDirectory);
@@ -246,7 +237,7 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Sine(220, 1.0, 48000, 0.35),
             SignalGenerator.Sine(660, 1.0, 48000, 0.35));
 
-        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
+        using var pipeline = new RecordingPipeline(Options(), factory);
 
         var recognitionDirectory = Path.Combine(_root, "recognition");
         var path = Path.Combine(_root, "with-working-audio.wav");
@@ -274,7 +265,7 @@ public sealed class PipelineTests : IDisposable
     public void KeepsNoWorkingAudioWhenTranscriptionIsTurnedOff()
     {
         var factory = new FakeCaptureFactory();
-        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
+        using var pipeline = new RecordingPipeline(Options(), factory);
 
         var path = Path.Combine(_root, "no-working-audio.wav");
         pipeline.Start(path, CreateSettings(), null);
@@ -292,12 +283,10 @@ public sealed class PipelineTests : IDisposable
     public void RecordingContinuesWithOnlyOneStreamWhenTheOtherDeviceIsUnavailable()
     {
         var factory = new FakeCaptureFactory(failSystem: true);
-        var transcript = new TranscriptStore();
 
         using var pipeline = new RecordingPipeline(
             Options(),
-            factory,
-            transcript);
+            factory);
 
         var path = Path.Combine(_root, "mic-only.wav");
         pipeline.Start(path, CreateSettings(), null);
@@ -325,8 +314,7 @@ public sealed class PipelineTests : IDisposable
 
         using var pipeline = new RecordingPipeline(
             Options(),
-            factory,
-            new TranscriptStore());
+            factory);
 
         var path = Path.Combine(_root, "denied-mic.wav");
         pipeline.Start(path, CreateSettings(), null);
@@ -353,8 +341,7 @@ public sealed class PipelineTests : IDisposable
 
         using var pipeline = new RecordingPipeline(
             Options(),
-            factory,
-            new TranscriptStore());
+            factory);
 
         var error = Assert.Throws<InvalidOperationException>(() =>
             pipeline.Start(Path.Combine(_root, "neither.wav"), CreateSettings(), null));
@@ -370,8 +357,7 @@ public sealed class PipelineTests : IDisposable
         var factory = new FakeCaptureFactory(failMicrophone: true, failSystem: true);
         using var pipeline = new RecordingPipeline(
             Options(),
-            factory,
-            new TranscriptStore());
+            factory);
 
         Assert.Throws<InvalidOperationException>(() =>
             pipeline.Start(Path.Combine(_root, "none.wav"), CreateSettings(), null));
@@ -388,8 +374,7 @@ public sealed class PipelineTests : IDisposable
 
         using var pipeline = new RecordingPipeline(
             Options(),
-            factory,
-            new TranscriptStore());
+            factory);
 
         var path = Path.Combine(_root, "timeline.wav");
         pipeline.Start(path, CreateSettings(), null);
@@ -411,19 +396,22 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Sine(300, 1.0, 48000, 0.35),
             SignalGenerator.Sine(700, 1.0, 48000, 0.35));
 
-        var transcript = new TranscriptStore();
-        using var pipeline = new RecordingPipeline(Options(), factory, transcript);
-
-        pipeline.Start(Path.Combine(_root, "no-live-stt.wav"), CreateSettings(), null, Path.Combine(_root, "no-live-stt"));
+        using var manager = new MeetingSessionManager(factory);
+        var folder = manager.Start(CreateSettings(), "no-live-stt");
 
         for (var i = 0; i < 6; i++)
         {
             Thread.Sleep(500);
-            Assert.Empty(transcript.Snapshot());
+            Assert.Empty(manager.Transcript.Snapshot());
         }
 
-        pipeline.Stop();
-        Assert.Empty(transcript.Snapshot());
+        var summary = manager.Stop();
+        Assert.Empty(manager.Transcript.Snapshot());
+
+        // Meanwhile the audio it should have been producing is all there.
+        Assert.True(File.Exists(summary.AudioPath));
+        Assert.True(summary.CanTranscribe, "the working audio should be ready for a transcription the user asks for");
+        Assert.True(RecognitionAudioNames.HasPerStreamAudio(folder.Path));
     }
 
     [Fact]
@@ -462,8 +450,7 @@ public sealed class PipelineTests : IDisposable
 
         using var pipeline = new RecordingPipeline(
             Options(),
-            factory,
-            new TranscriptStore());
+            factory);
 
         pipeline.Start(Path.Combine(_root, "levels.wav"), CreateSettings(), null);
         Thread.Sleep(800);
@@ -677,7 +664,6 @@ public sealed class PipelineTests : IDisposable
             using var pipeline = new RecordingPipeline(
                 Options(),
                 factory,
-                new TranscriptStore(),
                 sleepPreventer);
 
             pipeline.Start(Path.Combine(_root, $"sleep-{round}.wav"), settings, null);
@@ -690,33 +676,6 @@ public sealed class PipelineTests : IDisposable
         // Still usable afterwards - it was never disposed by the pipeline.
         Assert.True(sleepPreventer.Prevent("after both recordings"));
         sleepPreventer.Restore();
-    }
-
-    /// <summary>
-    /// A recognizer that fails the test if anything ever calls it.
-    /// </summary>
-    /// <remarks>
-    /// It exists so "no inference during a recording" is enforced rather than
-    /// observed: a recording path that reached a recognizer would trip this
-    /// immediately.
-    /// </remarks>
-    private sealed class ForbiddenRecognizer : ISpeechRecognizer
-    {
-        public int Calls { get; private set; }
-
-        public string ModelId => "forbidden";
-
-        public bool IsReady => true;
-
-        public IReadOnlyList<RecognizedSpan> Transcribe(ReadOnlySpan<float> samples, string language, CancellationToken cancellationToken)
-        {
-            Calls++;
-            throw new InvalidOperationException("Recording must never invoke a speech recognizer.");
-        }
-
-        public void Dispose()
-        {
-        }
     }
 
     private sealed class NoMp3Transcoder : IAudioTranscoder

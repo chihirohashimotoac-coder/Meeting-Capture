@@ -153,13 +153,18 @@ public sealed class MeetingSessionManager : IDisposable
         };
         _journal.WriteHeader(_metadata);
 
+        // The transcript is empty while recording - nothing writes to it until
+        // the user asks for a transcription - but the journal is attached now so
+        // that an edit made to a recovered meeting is itself recoverable.
+        Transcript.AttachJournal(_journal);
+
         var options = new RecordingPipelineOptions
         {
             Processing = settings.Processing,
             AutoSaveInterval = TimeSpan.FromSeconds(Math.Max(5, settings.AutoSaveIntervalSeconds)),
         };
 
-        _pipeline = new RecordingPipeline(options, _captureFactory, Transcript, _sleepPreventer, _logger, _writerFactory);
+        _pipeline = new RecordingPipeline(options, _captureFactory, _sleepPreventer, _logger, _writerFactory);
         _pipeline.Fault += (_, fault) => Fault?.Invoke(this, fault);
         _pipeline.StatusChanged += status => StatusChanged?.Invoke(status);
 
