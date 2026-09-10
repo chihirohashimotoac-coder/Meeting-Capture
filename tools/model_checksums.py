@@ -9,6 +9,11 @@ Usage:
     python3 tools/model_checksums.py selftest  # parse only, no network access
     python3 tools/model_checksums.py verify    # fail if any pin is wrong
     python3 tools/model_checksums.py refresh   # print a table of measured values
+    python3 tools/model_checksums.py measure <url> [<url> ...]
+                                               # hash files that are not in the
+                                               # catalog yet, so a candidate
+                                               # model can be pinned from the
+                                               # real bytes rather than guessed
 
 It is a maintenance tool. It is not part of the build and nothing it produces is
 shipped to users.
@@ -105,8 +110,46 @@ def measure(url: str) -> tuple[int, str]:
     return total, digest.hexdigest()
 
 
+def measure_candidates(urls: list[str]) -> int:
+    """Hashes URLs that are not in the catalog yet.
+
+    Adding a model means writing its size and SHA-256 into ModelCatalog.cs, and
+    those two numbers must never be typed from memory or copied from a web page.
+    This mode produces them from the bytes the publisher actually serves, which
+    is the only acceptable source for a value the downloader will then enforce.
+    """
+    failures = 0
+    print("| url | bytes | sha256 |")
+    print("| --- | --- | --- |")
+
+    for url in urls:
+        if not url.startswith("https://"):
+            print(f"refusing a non-HTTPS URL: {url}", file=sys.stderr)
+            failures += 1
+            continue
+
+        try:
+            size, sha = measure(url)
+        except Exception as error:  # noqa: BLE001 - report, do not hide
+            print(f"{url}: could not be measured: {error}", file=sys.stderr)
+            failures += 1
+            continue
+
+        print(f"| {url} | {size} | {sha} |")
+
+    return 1 if failures else 0
+
+
 def main() -> int:
     mode = sys.argv[1] if len(sys.argv) > 1 else "verify"
+
+    if mode == "measure":
+        urls = [u for u in sys.argv[2:] if u.strip()]
+        if not urls:
+            print("measure needs at least one URL.", file=sys.stderr)
+            return 2
+        return measure_candidates(urls)
+
     entries = parse_catalog(CATALOG.read_text(encoding="utf-8"))
     if not entries:
         print("No model entries found in the catalog.", file=sys.stderr)

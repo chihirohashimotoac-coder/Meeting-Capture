@@ -13,11 +13,16 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'verify (fail on mismatch) or refresh (print measured values)'
+        description: 'verify (fail on mismatch), refresh (print measured values) or measure (hash the URLs below)'
         required: true
         default: verify
         type: choice
-        options: [verify, refresh]
+        options: [verify, refresh, measure]
+      urls:
+        description: 'measure mode only: whitespace separated HTTPS URLs of candidate model files'
+        required: false
+        default: ''
+        type: string
   schedule:
     # Monthly drift check: an upstream re-upload would otherwise only be
     # discovered by a user whose download suddenly fails verification.
@@ -44,4 +49,14 @@ jobs:
         run: python3 tools/model_checksums.py selftest
 
       - name: Verify pinned SHA-256 values
+        if: inputs.mode != 'measure'
         run: python3 tools/model_checksums.py "${{ inputs.mode || 'verify' }}"
+
+      - name: Measure candidate model files
+        # Used when a model is being considered for the catalog: its size and
+        # SHA-256 have to be measured from the publisher's bytes before they can
+        # be pinned, and guessing either value is not an option.
+        if: inputs.mode == 'measure'
+        env:
+          CANDIDATE_URLS: ${{ inputs.urls }}
+        run: python3 tools/model_checksums.py measure $CANDIDATE_URLS
