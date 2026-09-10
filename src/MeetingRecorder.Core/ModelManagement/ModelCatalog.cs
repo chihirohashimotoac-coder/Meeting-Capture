@@ -16,6 +16,13 @@ namespace MeetingRecorder.Core.ModelManagement;
 /// installing something unverified - re-run that workflow to refresh the pins.
 /// Sizes are the exact byte counts from the same run.
 /// </para>
+/// <para><b>The RelativeCost figures</b> are estimates from encoder compute
+/// (layers x width squared), normalised to whisper small = 12 x 768² :
+/// medium is 24 x 1024² = 3.6x, large-v3-turbo is 32 x 1280² = 7.4x. See
+/// <see cref="ModelDescriptor.RelativeCost"/> for why the decoder is left out
+/// and why erring high is the safe direction. None of these is a measurement of
+/// the reference machine, and nothing in the product presents them as one.
+/// </para>
 /// <para><b>Why these models</b></para>
 /// <list type="bullet">
 /// <item><description>
@@ -140,7 +147,7 @@ public static class ModelCatalog
             License = "MIT",
             LicenseUrl = "https://github.com/ggerganov/whisper.cpp/blob/master/LICENSE",
             RequiredRamMb = 2400,
-            RelativeCost = 6.6,
+            RelativeCost = 7.4,
             Notes = "large-v3 のエンコーダーをそのまま持ち、デコーダーは4層。録音後にまとめて処理する用途向け。",
         },
     };

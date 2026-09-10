@@ -55,7 +55,28 @@ public sealed record ModelDescriptor
     /// <summary>Rough resident memory needed to run the model.</summary>
     public required int RequiredRamMb { get; init; }
 
-    /// <summary>Relative speed hint used by the profile selector (higher = slower).</summary>
+    /// <summary>
+    /// Relative processing cost, with whisper small = 1.0 (higher = slower).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// An <b>estimate</b>, derived from encoder compute - layers x width squared
+    /// - because that term dominates whisper.cpp on a CPU. It is used to pick a
+    /// starting model and to show a rough waiting time in the settings window,
+    /// and it is labelled there as an estimate. It is never presented as a
+    /// measurement of the user's machine, and nothing depends on it being right:
+    /// a bad estimate costs a worse default, which the user can change.
+    /// </para>
+    /// <para>
+    /// The derivation deliberately ignores the decoder, which makes the number
+    /// pessimistic for a distilled model like large-v3-turbo (a full-size
+    /// encoder with only four decoder layers). Correcting for that would mean
+    /// guessing at the token-to-frame ratio of a particular meeting, and a
+    /// pessimistic estimate is the safer error: it makes the automatic choice
+    /// conservative rather than making the user wait for something they did not
+    /// expect.
+    /// </para>
+    /// </remarks>
     public double RelativeCost { get; init; } = 1.0;
 
     public string? Notes { get; init; }
