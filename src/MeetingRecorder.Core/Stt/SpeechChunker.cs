@@ -13,10 +13,15 @@ namespace MeetingRecorder.Core.Stt;
 /// and it is tagged at construction.
 /// </para>
 /// <para>
-/// Because the VAD gates each stream independently, the CPU cost stays close to
+/// Because the VAD gates each stream independently, the work stays close to
 /// "one stream's worth" in practice - in a meeting either the room or the remote
 /// side is talking, rarely both - while still never attributing a sentence to
 /// the wrong side.
+/// </para>
+/// <para>
+/// It is used only by <see cref="OfflineTranscriptionService"/>, which asks it
+/// for the longest windows whisper can use. Nothing calls it while a recording
+/// is running.
 /// </para>
 /// <para>
 /// A chunk is emitted when speech has stopped for <c>SilenceFlushMs</c>, or when
@@ -63,9 +68,6 @@ public sealed class SpeechChunker
         _silenceFlushFrames = Math.Max(1, (int)(silenceFlushMs / 1000.0 * SpeechConstants.SampleRate / _vad.FrameSamples));
         _overlapSamples = (int)(SpeechConstants.SampleRate * overlapMs / 1000.0);
     }
-
-    /// <summary>Milliseconds of audio the chunker has consumed so far.</summary>
-    public long PositionMs => _consumedSamples * 1000 / SpeechConstants.SampleRate;
 
     public bool IsSpeechActive => _vad.IsSpeech;
 
