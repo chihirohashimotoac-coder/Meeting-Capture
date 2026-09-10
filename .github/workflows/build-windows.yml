@@ -221,45 +221,6 @@ jobs:
           --filter "FullyQualifiedName~RealModelRecognitionTests"
           --logger "console;verbosity=detailed"
 
-      - name: Evaluate candidate speech models against the real engine
-        # Only when asked for. Adding a model to ModelCatalog.cs is a claim that
-        # whisper.cpp as shipped can load it and that the reference machine can
-        # hold it, and a claim like that should come from having run it. The
-        # numbers printed here describe this runner, not a user's laptop.
-        if: inputs.evaluate_models != ''
-        shell: pwsh
-        env:
-          MEETINGRECORDER_TEST_AUDIO: ${{ github.workspace }}/.test-audio/speech.wav
-          MEETINGRECORDER_TEST_LANGUAGE: ${{ steps.speech.outputs.language }}
-          MEETINGRECORDER_REQUIRE_REAL_STT: '1'
-          CANDIDATES: ${{ inputs.evaluate_models }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $dir = "${{ github.workspace }}/.candidate-models"
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-
-          foreach ($name in ($env:CANDIDATES -split '\s+' | Where-Object { $_ })) {
-            $path = Join-Path $dir $name
-            $url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$name"
-
-            Write-Host "::group::$name"
-            Invoke-WebRequest -Uri $url -OutFile $path
-
-            # Printed so the catalog's pinned values can be checked against what
-            # was actually run.
-            Write-Host ("{0}: {1:N0} bytes, sha256 {2}" -f $name, (Get-Item $path).Length, (Get-FileHash $path -Algorithm SHA256).Hash.ToLower())
-
-            $env:MEETINGRECORDER_TEST_MODEL = $path
-            dotnet test tests/MeetingRecorder.Stt.Tests/MeetingRecorder.Stt.Tests.csproj `
-              --configuration Release `
-              --no-build `
-              --filter "FullyQualifiedName~RealModelRecognitionTests" `
-              --logger "console;verbosity=detailed"
-
-            Remove-Item $path -Force
-            Write-Host "::endgroup::"
-          }
-
       - name: Install a virtual audio endpoint (CI fixture only)
         id: virtual_audio
         # A GitHub-hosted Windows runner has no sound card at all, which is why
@@ -580,3 +541,56 @@ jobs:
             ${{ github.workspace }}/artifacts/diagnose.json
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Evaluate candidate speech models against the real engine
+        # Only when asked for. Adding a model to ModelCatalog.cs is a claim that
+        # whisper.cpp as shipped can load it and that the reference machine can
+        # hold it, and a claim like that should come from having run it. The
+        # numbers printed here describe this runner, not a user's laptop.
+        #
+        # Deliberately the last step in the job: it downloads more than a
+        # gigabyte and must not delay the build, the tests or the artifact, and
+        # putting it last keeps its output at the end of the log where it can be
+        # read without hunting.
+        if: inputs.evaluate_models != ''
+        shell: pwsh
+        env:
+          MEETINGRECORDER_TEST_AUDIO: ${{ github.workspace }}/.test-audio/speech.wav
+          MEETINGRECORDER_TEST_LANGUAGE: ${{ steps.speech.outputs.language }}
+          MEETINGRECORDER_REQUIRE_REAL_STT: '1'
+          CANDIDATES: ${{ inputs.evaluate_models }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = "${{ github.workspace }}/.candidate-models"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $summary = ""
+
+          foreach ($name in ($env:CANDIDATES -split '\s+' | Where-Object { $_ })) {
+            $path = Join-Path $dir $name
+            $url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$name"
+
+            Write-Host "::group::$name"
+            Invoke-WebRequest -Uri $url -OutFile $path
+
+            # Printed so the catalog's pinned values can be checked against what
+            # was actually run.
+            Write-Host ("{0}: {1:N0} bytes, sha256 {2}" -f $name, (Get-Item $path).Length, (Get-FileHash $path -Algorithm SHA256).Hash.ToLower())
+
+            $env:MEETINGRECORDER_TEST_MODEL = $path
+            dotnet test tests/MeetingRecorder.Stt.Tests/MeetingRecorder.Stt.Tests.csproj `
+              --configuration Release `
+              --no-build `
+              --filter "FullyQualifiedName~RealModelRecognitionTests" `
+              --logger "console;verbosity=detailed"
+
+            Remove-Item $path -Force
+            Write-Host "::endgroup::"
+
+            # Repeated outside the collapsed group so the whole comparison is
+            # visible in one place at the end of the log.
+            $summary += "$name`n"
+          }
+
+          Write-Host "=== models evaluated ==="
+          Write-Host $summary
+          Write-Host "Per-model figures (load time, working set, RTF, text) are in the groups above."

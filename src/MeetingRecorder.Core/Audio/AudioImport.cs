@@ -130,7 +130,15 @@ public sealed class CompositeAudioDecoder : IAudioDecoder
 
     public bool CanDecode(string sourcePath, out string? reason)
     {
-        string? firstReason = null;
+        var extension = Path.GetExtension(sourcePath);
+
+        // Only a decoder that claims this extension can explain a failure
+        // usefully. Without this, an MP3 that Media Foundation cannot open on a
+        // Windows N machine would be reported as "the WAV decoder cannot handle
+        // this format" - true, useless, and hiding the one message that names
+        // the remedy.
+        string? specificReason = null;
+
         foreach (var decoder in _decoders)
         {
             if (decoder.CanDecode(sourcePath, out var decoderReason))
@@ -139,10 +147,13 @@ public sealed class CompositeAudioDecoder : IAudioDecoder
                 return true;
             }
 
-            firstReason ??= decoderReason;
+            if (decoder.SupportedExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+            {
+                specificReason = decoderReason;
+            }
         }
 
-        reason = firstReason ?? "この形式に対応するデコーダーがありません。";
+        reason = specificReason ?? "この形式に対応するデコーダーがありません。";
         return false;
     }
 

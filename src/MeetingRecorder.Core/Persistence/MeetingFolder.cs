@@ -4,16 +4,25 @@ using MeetingRecorder.Core.Models;
 namespace MeetingRecorder.Core.Persistence;
 
 /// <summary>
-/// One meeting on disk:
+/// One meeting on disk. Recorded here:
 /// <code>
 /// 2026-09-07_1430_Meeting/
 ///   meeting.wav | meeting.mp3
+///   recognition-mic.wav      (until a transcription deletes it)
+///   recognition-system.wav   (likewise)
 ///   transcript.txt
 ///   transcript.md
 ///   minutes.txt
 ///   minutes.md
 ///   metadata.json
-///   session.journal   (only while recording / after a crash)
+///   session.journal          (only while recording / after a crash)
+/// </code>
+/// or imported, in which case the audio itself stays where the user put it and
+/// only the working copy lives here:
+/// <code>
+/// 2026-09-07_1512_interview/
+///   recognition-import.wav
+///   transcript.txt / .md, minutes.txt / .md, metadata.json
 /// </code>
 /// </summary>
 public sealed class MeetingFolder

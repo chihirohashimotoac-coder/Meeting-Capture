@@ -262,6 +262,39 @@ public sealed class AudioImportTests : IDisposable
         Assert.Empty(partial);
     }
 
+    [Fact]
+    public void ARefusalNamesTheDecoderThatShouldHaveHandledTheFormat()
+    {
+        // The failure mode this guards: on a machine where the platform decoder
+        // is missing, an MP3 would be refused by the WAV decoder first, and the
+        // user would be told "the WAV decoder cannot handle this" instead of the
+        // one message that names the Media Feature Pack.
+        var path = Path.Combine(_root, "meeting.mp3");
+        File.WriteAllBytes(path, new byte[] { 0xFF, 0xFB, 0x90, 0x00 });
+
+        var decoder = new CompositeAudioDecoder(new WavAudioDecoder(), new AlwaysRefusingMp3Decoder());
+
+        Assert.False(decoder.CanDecode(path, out var reason));
+        Assert.Equal(AlwaysRefusingMp3Decoder.Reason, reason);
+    }
+
+    /// <summary>Claims MP3 and always refuses it, with a message worth showing.</summary>
+    private sealed class AlwaysRefusingMp3Decoder : IAudioDecoder
+    {
+        public const string Reason = "この形式をこのPCで再生（デコード）できません。Media Feature Pack が必要です。";
+
+        public IReadOnlyList<string> SupportedExtensions { get; } = new[] { ".mp3" };
+
+        public bool CanDecode(string sourcePath, out string? reason)
+        {
+            reason = Reason;
+            return false;
+        }
+
+        public void DecodeToMonoWav(string sourcePath, string destinationPath, int targetSampleRate)
+            => throw new NotSupportedException(Reason);
+    }
+
     /// <summary>Writes a little audio and then throws, like a disk filling up.</summary>
     private sealed class HalfwayFailingDecoder : IAudioDecoder
     {

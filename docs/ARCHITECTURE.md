@@ -513,6 +513,15 @@ Intel 内蔵GPU での安定性・ドライバ依存・配布サイズ増を勘�
 - CI は `windows-latest` 上で restore → build → test → publish → ZIP → artifact を実行し、
   publish 出力に `MeetingRecorder.exe` / ランタイム / whisper ネイティブが存在すること、
   および **AIモデルが混入していないこと** を検証します。
+- `build-windows.yml` の手動実行では `evaluate_models` 入力に ggml ファイル名を渡せます。
+  指定したモデルを実際にダウンロードし、製品と同じデコード設定で推論させ、
+  サイズ・SHA-256・読み込み時間・ワーキングセット・処理時間を出力します。
+  **カタログにモデルを追加する前に、実際に動くことを確かめるための入口です。**
+  空（既定）のときは通常のビルドと変わりません。
+- **WPF を含む完全なビルドは Windows でしか行えません。** Linux では
+  `Core` / `Stt` / `Diarization` / `Minutes` / `Audio` とそのテストのみビルド・実行できます
+  （`.NET SDK` の WindowsDesktop コンポーネントが非 Windows 版に含まれないため）。
+  したがってアプリ本体のコンパイル確認は CI が唯一の手段です。
 
 ---
 
