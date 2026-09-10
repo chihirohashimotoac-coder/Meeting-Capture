@@ -139,6 +139,9 @@ commit `f7232d4`）。
 
 | Test | Environment | Result | Notes |
 | --- | --- | --- | --- |
+| **バースト配信でも録音が途切れない** | Ubuntu / GitHub Actions | PASS | 実機と同じ100ms単位のバースト配信＋遅延。**挿入無音 0 ms・欠落 0 箇所**（修正前は 3.3 秒中 323 ms が無音、100ms窓23個中2個が破損） |
+| マイクが痩せたら警告する | Ubuntu / GitHub Actions | PASS | クロック 0.66 倍のマイクで 24% の挿入無音を検出し報告 |
+| 正常な録音では警告を出さない | Ubuntu / GitHub Actions | PASS | 停止時にリングを空にする処理を欠落と誤認しない |
 | リングバッファの順序保持とラップ | GitHub Actions / windows-latest | PASS | |
 | コンシューマ停止時に最古を破棄しカウント | GitHub Actions / windows-latest | PASS | オーバーラン計上 |
 | ドリフト補正が通常時に発動しない | GitHub Actions / windows-latest | PASS | |

@@ -20,6 +20,31 @@ public sealed class RecordingPipelineOptions
     /// <summary>Capacity of each capture ring buffer.</summary>
     public double RingBufferSeconds { get; init; } = 30.0;
 
+    /// <summary>
+    /// Audio the pump keeps buffered ahead of itself, in seconds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The pump consumes on the wall clock, which is what keeps the two streams
+    /// on one timeline. But an endpoint does not deliver on the wall clock: it
+    /// delivers a whole buffer at a time, and the gap between two deliveries is
+    /// whatever Windows decided to schedule. Consuming with nothing in hand
+    /// means every one of those gaps is a hole punched into the recording -
+    /// measured at roughly one 100 ms hole per second of meeting, which is
+    /// exactly as bad as it sounds.
+    /// </para>
+    /// <para>
+    /// So the pump waits this long before it takes its first sample, and from
+    /// then on it is always this far behind the capture. Nothing is lost and
+    /// nothing is added: the recording still advances at exactly one second per
+    /// second, it simply has a cushion to absorb a late delivery instead of
+    /// writing silence. 250 ms comfortably covers a 100 ms WASAPI buffer plus
+    /// ordinary scheduling jitter on a loaded laptop, and it is the backlog
+    /// <see cref="DriftCompensator"/> was always written to expect.
+    /// </para>
+    /// </remarks>
+    public double JitterBufferSeconds { get; init; } = 0.25;
+
     /// <summary>How often the WAV header and the journal are flushed to disk.</summary>
     public TimeSpan AutoSaveInterval { get; init; } = TimeSpan.FromSeconds(15);
 
@@ -109,6 +134,7 @@ public sealed class RecordingPipeline : IDisposable
     private double _systemSilenceSeconds;
     private DateTime _lastFlushUtc;
     private volatile RecordingState _state = RecordingState.Idle;
+    private volatile bool _draining;
     private bool _disposed;
 
     public RecordingPipeline(
@@ -242,8 +268,10 @@ public sealed class RecordingPipeline : IDisposable
         _systemRing = AudioRingBuffer.ForSeconds(rate, _options.RingBufferSeconds);
         _micChain = new AudioProcessingChain(_options.Processing, rate);
         _systemChain = new AudioProcessingChain(_options.Processing, rate);
-        _micDrift = new DriftCompensator(rate);
-        _systemDrift = new DriftCompensator(rate);
+        // The compensator's idea of "normal" has to match the cushion the pump
+        // keeps, or it would read the cushion as drift and correct it away.
+        _micDrift = new DriftCompensator(rate, _options.JitterBufferSeconds);
+        _systemDrift = new DriftCompensator(rate, _options.JitterBufferSeconds);
         _mixer = new StreamMixer(_options.Processing, rate);
         _micToRecognition = new Resampler(rate, SpeechConstants.SampleRate);
         _systemToRecognition = new Resampler(rate, SpeechConstants.SampleRate);
@@ -465,14 +493,40 @@ public sealed class RecordingPipeline : IDisposable
         {
             while (!token.IsCancellationRequested)
             {
-                var elapsed = _clock!.Elapsed;
-                var target = (long)(elapsed.TotalSeconds * rate);
-                var need = (int)Math.Min(target - _producedSamples, maxBlock);
-
-                if (need <= 0)
+                int need;
+                var caughtUp = true;
+                if (_draining)
                 {
-                    Thread.Sleep(tick);
-                    continue;
+                    // Capture has stopped and the pump is one jitter buffer
+                    // behind, so what is left in the rings is the tail of the
+                    // meeting. Take exactly that - asking the wall clock for more
+                    // would only pad the end with silence and count it as a gap.
+                    need = (int)Math.Min(
+                        maxBlock,
+                        Math.Max(_micRing?.Count ?? 0, _systemRing?.Count ?? 0));
+
+                    if (need <= 0)
+                    {
+                        break;
+                    }
+                }
+                else
+                {
+                    // One jitter buffer behind real time - see JitterBufferSeconds.
+                    var elapsed = _clock!.Elapsed;
+                    var target = (long)(
+                        Math.Max(0.0, elapsed.TotalSeconds - _options.JitterBufferSeconds) * rate);
+                    need = (int)Math.Min(target - _producedSamples, maxBlock);
+
+                    if (need <= 0)
+                    {
+                        Thread.Sleep(tick);
+                        continue;
+                    }
+
+                    // Only rest once the file has caught up with the clock;
+                    // otherwise loop straight round and keep closing the gap.
+                    caughtUp = target - _producedSamples - need < rate / 100;
                 }
 
                 ProcessBlock(micBuffer.AsSpan(0, need), systemBuffer.AsSpan(0, need), mixBuffer.AsSpan(0, need), tick.TotalSeconds);
@@ -483,7 +537,7 @@ public sealed class RecordingPipeline : IDisposable
                     FlushToDisk();
                 }
 
-                if (target - _producedSamples < rate / 100)
+                if (!_draining && caughtUp)
                 {
                     Thread.Sleep(tick);
                 }
@@ -612,7 +666,14 @@ public sealed class RecordingPipeline : IDisposable
             // loopback delivers nothing at all while nothing is playing). Silence
             // keeps the timeline honest either way.
             var inserted = destination.Length - read;
-            drift.ReportSilenceInserted(inserted);
+            if (!_draining)
+            {
+                // While draining the rings are supposed to run dry; counting that
+                // as a starved stream would report a gap at the end of every
+                // healthy recording.
+                drift.ReportSilenceInserted(inserted);
+            }
+
             silenceSeconds += inserted / (double)sampleRate;
         }
         else
@@ -737,11 +798,29 @@ public sealed class RecordingPipeline : IDisposable
             _logger.Warn(nameof(RecordingPipeline), $"Stopping capture reported: {ex.Message}");
         }
 
-        // Give the pump a moment to drain whatever is still in the rings, so the
-        // last word spoken before Stop is on disk.
-        Thread.Sleep((int)Math.Min(500, _options.PumpInterval.TotalMilliseconds * 10));
+        // Drain: the pump normally runs one jitter buffer behind the capture, so
+        // stopping without emptying the rings would throw away the last quarter
+        // second of the meeting - which is usually somebody finishing a
+        // sentence. Draining lets it consume everything that was captured, then
+        // stops. Bounded, because a wedged ring must not hang the application.
+        _draining = true;
+        var drainDeadline = DateTime.UtcNow
+            + TimeSpan.FromSeconds(_options.JitterBufferSeconds + 1.0);
+        while (DateTime.UtcNow < drainDeadline)
+        {
+            if ((_micRing?.Count ?? 0) == 0 && (_systemRing?.Count ?? 0) == 0)
+            {
+                // One more tick so the pump writes what it has just read.
+                Thread.Sleep(_options.PumpInterval);
+                break;
+            }
+
+            Thread.Sleep(10);
+        }
+
         _cts?.Cancel();
         _pump?.Join(TimeSpan.FromSeconds(5));
+        _draining = false;
 
         var duration = TimeSpan.FromSeconds(_writer?.DurationSeconds ?? 0);
         var path = _writer?.FilePath ?? string.Empty;
@@ -762,8 +841,58 @@ public sealed class RecordingPipeline : IDisposable
         _sleepPreventer.Restore();
         _state = RecordingState.Idle;
 
+        ReportCaptureGaps(duration);
+
         _logger.Info(nameof(RecordingPipeline), $"Recording stopped after {duration:hh\\:mm\\:ss} -> {path}");
         return new RecordingResult(path, duration, Warnings, recognitionDirectory);
+    }
+
+    /// <summary>
+    /// Says so when the microphone starved and silence had to be written in its
+    /// place.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The microphone leg delivers continuously or it is broken - unlike loopback,
+    /// which legitimately delivers nothing at all while the endpoint is silent, so
+    /// only the microphone is judged here.
+    /// </para>
+    /// <para>
+    /// The pump keeps a jitter buffer precisely so this does not happen, and in a
+    /// healthy recording the figure is zero. It being non-zero means audio that
+    /// was spoken is not in the file, and that is worth a sentence at the end of
+    /// the meeting rather than a number in a diagnostics line nobody reads.
+    /// </para>
+    /// </remarks>
+    private void ReportCaptureGaps(TimeSpan duration)
+    {
+        var insertedSamples = _micDrift?.InsertedSilenceSamples ?? 0;
+        if (insertedSamples <= 0 || duration <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var insertedSeconds = insertedSamples / (double)_options.SampleRate;
+        var fraction = insertedSeconds / duration.TotalSeconds;
+
+        _logger.Info(
+            nameof(RecordingPipeline),
+            $"Microphone silence inserted: {insertedSeconds:F2}s of {duration.TotalSeconds:F0}s ({fraction * 100:F2}%).");
+
+        // A tenth of a percent is a handful of milliseconds around a device
+        // hiccup and is not worth alarming anybody about. Above one percent the
+        // recording audibly stutters.
+        if (fraction < 0.001)
+        {
+            return;
+        }
+
+        var message =
+            $"マイクの音声が途切れ、合計 {insertedSeconds:F1} 秒（録音全体の {fraction * 100:F1}%）を無音で補いました。"
+            + "その部分の音声は残っていません。"
+            + "録音中に他の重い処理を動かしていた場合は、次回は停止してからお試しください。";
+
+        AddWarning(message);
     }
 
     private void AddWarning(string message)
