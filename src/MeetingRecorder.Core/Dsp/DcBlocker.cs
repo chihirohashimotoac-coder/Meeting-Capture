@@ -2,9 +2,16 @@ namespace MeetingRecorder.Core.Dsp;
 
 /// <summary>
 /// First order high-pass that removes the DC offset some USB microphones and
-/// virtual endpoints produce. A DC offset eats head-room and biases the RMS
-/// measurement the AGC depends on.
+/// virtual endpoints produce.
 /// </summary>
+/// <remarks>
+/// This is the only filter left in the recording path, and it is here because a
+/// DC offset is not free: it consumes head-room, which directly reduces the
+/// constant gain <see cref="Audio.PeakNormalizer"/> is allowed to apply, and it
+/// displaces every peak measurement taken from the file. At the default 20 Hz
+/// the -3 dB point sits an octave below the lowest fundamental of an adult
+/// voice (~80 Hz), so speech passes through it essentially unchanged.
+/// </remarks>
 public sealed class DcBlocker
 {
     private readonly double _r;

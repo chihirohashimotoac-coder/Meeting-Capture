@@ -1,5 +1,6 @@
 using MeetingRecorder.Core.Benchmark;
 using MeetingRecorder.Core.ModelManagement;
+using MeetingRecorder.Core.Models;
 using Xunit;
 
 namespace MeetingRecorder.Core.Tests;
@@ -59,6 +60,30 @@ public class ModelCatalogTests
     }
 
     [Fact]
+    public void TheCatalogOffersALargeV3TurboBuild()
+    {
+        // Added deliberately, with a size and a hash measured from the file the
+        // publisher actually serves (.github/workflows/model-hashes.yml).
+        var turbo = ModelCatalog.RequireSpeechModel(ModelCatalog.WhisperLargeV3Turbo);
+
+        Assert.Equal(574_041_195, turbo.ApproximateSizeBytes);
+        Assert.Equal("394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2", turbo.Sha256);
+        Assert.EndsWith("ggml-large-v3-turbo-q5_0.bin", turbo.Url, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NoModelIsDescribedAsBeingForRealTimeTranscription()
+    {
+        // The catalog text is what a user reads before downloading half a
+        // gigabyte. It must not promise a feature that no longer exists.
+        foreach (var model in ModelCatalog.SpeechModels)
+        {
+            Assert.DoesNotContain("リアルタイム", model.PurposeDescription, StringComparison.Ordinal);
+            Assert.DoesNotContain("リアルタイム", model.Notes ?? string.Empty, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void SizeDisplayIsHumanReadable()
     {
         Assert.EndsWith("MB", ModelCatalog.RequireSpeechModel(ModelCatalog.WhisperBase).SizeDisplay);
@@ -72,10 +97,10 @@ public class ProfileSelectorTests
         => new(cores, ramGb, score, score, 100);
 
     [Fact]
-    public void AFastMachineGetsABetterModelThanASlowOne()
+    public void AFastMachineGetsAMoreAccurateModelThanASlowOne()
     {
-        var fast = ProfileSelector.Select(Machine(4.0));
-        var slow = ProfileSelector.Select(Machine(0.2));
+        var fast = ProfileSelector.Select(Machine(20.0));
+        var slow = ProfileSelector.Select(Machine(0.05));
 
         var ladder = new[]
         {
@@ -83,6 +108,7 @@ public class ProfileSelectorTests
             ModelCatalog.WhisperBase,
             ModelCatalog.WhisperSmall,
             ModelCatalog.WhisperMedium,
+            ModelCatalog.WhisperLargeV3Turbo,
         };
 
         Assert.True(
@@ -91,16 +117,40 @@ public class ProfileSelectorTests
     }
 
     [Fact]
-    public void TheReferenceMachineStaysWithinItsRealTimeBudget()
+    public void TheSelectorClimbsTowardsAccuracyRatherThanTowardsSpeed()
     {
-        // Core i5-1335U class: the probe is normalised so this scores about 1.0.
-        var profile = ProfileSelector.Select(Machine(1.0, cores: 12, ramGb: 16));
-        var model = ModelCatalog.RequireSpeechModel(profile.SttModelId);
-        var estimated = ProfileSelector.EstimateRealTimeFactor(model, Machine(1.0, 12, 16));
+        // The old selector could only ever pick something small, because a live
+        // transcript had to keep up. Given enough machine, this one has to reach
+        // the top of the ladder.
+        var profile = ProfileSelector.Select(Machine(20.0, cores: 16, ramGb: 32));
+        Assert.Equal(ModelCatalog.WhisperLargeV3Turbo, profile.SttModelId);
+    }
 
-        Assert.True(estimated <= ProfileSelector.TargetRealTimeFactor,
-            $"selected {profile.SttModelId} with estimated RTF {estimated:F2}");
-        Assert.NotEqual(ModelCatalog.WhisperMedium, profile.SttModelId);
+    [Fact]
+    public void TheAutomaticChoiceStaysWithinTheWaitingBudget()
+    {
+        var capability = Machine(1.0, cores: 12, ramGb: 16);
+        var profile = ProfileSelector.Select(capability);
+        var model = ModelCatalog.RequireSpeechModel(profile.SttModelId);
+        var estimated = ProfileSelector.EstimateProcessingFactor(model, capability);
+
+        Assert.True(
+            estimated <= ProfileSelector.AcceptableProcessingFactor,
+            $"selected {profile.SttModelId} with an estimated factor of {estimated:F2}");
+        Assert.Equal(estimated, profile.EstimatedProcessingFactor, 3);
+    }
+
+    [Fact]
+    public void EveryModelInTheCatalogRemainsSelectableByHandHoweverSlow()
+    {
+        // The budget caps what is chosen automatically, not what is offered. A
+        // user who is happy to wait overnight for the best transcript must be
+        // able to say so.
+        var capability = Machine(1.0, cores: 12, ramGb: 16);
+        var turbo = ModelCatalog.RequireSpeechModel(ModelCatalog.WhisperLargeV3Turbo);
+
+        Assert.True(ProfileSelector.EstimateProcessingFactor(turbo, capability) > 0);
+        Assert.True(ProfileSelector.FitsInMemory(turbo, capability), "16 GB must be able to hold large-v3-turbo q5_0");
     }
 
     [Fact]
@@ -109,8 +159,18 @@ public class ProfileSelectorTests
         var profile = ProfileSelector.Select(Machine(10.0, cores: 8, ramGb: 4));
         var model = ModelCatalog.RequireSpeechModel(profile.SttModelId);
 
-        Assert.True(model.RequiredRamMb * 3.0 <= 4 * 1024);
+        Assert.True(model.RequiredRamMb * ProfileSelector.RequiredRamHeadroom <= 4 * 1024);
         Assert.False(profile.MinutesEnabled, "an experimental LLM must not be enabled on a 4 GB machine");
+    }
+
+    [Fact]
+    public void AVerySlowMachineStillGetsAModelRatherThanNone()
+    {
+        // Falling off the bottom of the ladder would leave the user unable to
+        // transcribe at all, which is worse than a slow transcription they chose
+        // to start.
+        var profile = ProfileSelector.Select(Machine(0.01, cores: 2, ramGb: 4));
+        Assert.Equal(ModelCatalog.WhisperTiny, profile.SttModelId);
     }
 
     [Fact]
@@ -123,40 +183,19 @@ public class ProfileSelectorTests
     }
 
     [Fact]
-    public void DegradationFollowsTheSpecifiedLadderAndNeverTouchesRecording()
+    public void NothingInTheProfileTunesALiveTranscript()
     {
-        var profile = ProfileSelector.Select(Machine(2.0));
-        profile.DiarizationEnabled = true;
-        profile.MinutesEnabled = true;
-        profile.SttModelId = ModelCatalog.WhisperSmall;
+        // Chunk lengths, overlaps, silence thresholds and a second model id were
+        // all there to make a live caption keep up. There is no live caption.
+        var forbidden = new[] { "Chunk", "Overlap", "SilenceFlush", "Beam", "Vad", "Refinement", "RealTime" };
 
-        // 1. Speaker diarization goes first.
-        var step1 = ProfileSelector.Degrade(profile, 1.2);
-        Assert.NotNull(step1);
-        Assert.False(step1!.DiarizationEnabled);
-        Assert.Equal(ModelCatalog.WhisperSmall, step1.SttModelId);
+        var offending = typeof(PerformanceProfile)
+            .GetProperties()
+            .Where(p => forbidden.Any(f => p.Name.Contains(f, StringComparison.OrdinalIgnoreCase)))
+            .Select(p => p.Name)
+            .ToList();
 
-        // 2. Then a lighter recognition model.
-        var step2 = ProfileSelector.Degrade(step1, 1.2);
-        Assert.NotNull(step2);
-        Assert.Equal(ModelCatalog.WhisperBase, step2!.SttModelId);
-
-        var step3 = ProfileSelector.Degrade(step2, 1.2);
-        Assert.Equal(ModelCatalog.WhisperTiny, step3!.SttModelId);
-
-        // 3. Finally the local LLM.
-        var step4 = ProfileSelector.Degrade(step3, 1.2);
-        Assert.False(step4!.MinutesEnabled);
-
-        // Nothing left to give up: recording and transcription are never dropped.
-        Assert.Null(ProfileSelector.Degrade(step4, 1.2));
-    }
-
-    [Fact]
-    public void NoDegradationHappensWhileTheMachineKeepsUp()
-    {
-        var profile = ProfileSelector.Select(Machine(2.0));
-        Assert.Null(ProfileSelector.Degrade(profile, 0.4));
+        Assert.True(offending.Count == 0, $"PerformanceProfile still exposes: {string.Join(", ", offending)}");
     }
 
     [Fact]
@@ -186,6 +225,6 @@ public class ProfileSelectorTests
     {
         var profile = ProfileSelector.Select(Machine(1.0, 12, 16));
         Assert.False(string.IsNullOrWhiteSpace(profile.Rationale));
-        Assert.Contains("RTF", profile.Rationale);
+        Assert.Contains("推定処理時間", profile.Rationale);
     }
 }

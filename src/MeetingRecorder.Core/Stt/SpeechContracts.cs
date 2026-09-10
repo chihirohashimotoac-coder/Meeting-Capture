@@ -55,9 +55,35 @@ public interface ISpeechRecognizer : IDisposable
 }
 
 /// <summary>
-/// How a recognizer should decode. The two passes want opposite things, so the
-/// choice is explicit rather than hidden in the engine.
+/// Decoding constants, in their own type only because a record's primary
+/// constructor cannot use its own members as default values.
 /// </summary>
+public static class SpeechDecodingDefaults
+{
+    /// <summary>
+    /// Beam width. 5 is whisper's own reference value; a beam search costs
+    /// roughly twice a greedy decode and is the single cheapest accuracy
+    /// improvement available once nothing is waiting for the result.
+    /// </summary>
+    public const int BeamSize = 5;
+
+    /// <summary>
+    /// Whisper's own default temperature-fallback step. A decode that comes out
+    /// degenerate is retried warmer, which costs time on the passages that need
+    /// it and nothing on the rest.
+    /// </summary>
+    public const float TemperatureIncrement = 0.2f;
+}
+
+/// <summary>
+/// How a recognizer should decode.
+/// </summary>
+/// <remarks>
+/// There is one pass in this application and it runs when a recording is
+/// already finished, so these values are chosen for accuracy without a latency
+/// budget to trade against. The type is kept explicit rather than hidden inside
+/// the engine so that the choice is reviewable, and so a test can assert it.
+/// </remarks>
 /// <param name="Threads">Worker threads handed to whisper.cpp.</param>
 /// <param name="BeamSize">1 for greedy decoding; higher searches wider and costs proportionally more.</param>
 /// <param name="InitialPrompt">
@@ -67,15 +93,14 @@ public interface ISpeechRecognizer : IDisposable
 /// </param>
 /// <param name="TemperatureIncrement">
 /// Whisper's fallback: when a decode looks degenerate it retries at a higher
-/// temperature. 0 disables the retries and is roughly twice as fast in the worst
-/// case; 0.2 is whisper's own default and recovers passages the first attempt
-/// mangles.
+/// temperature. 0.2 is whisper's own default and recovers passages the first
+/// attempt mangles, at the cost of time on those passages only.
 /// </param>
 public readonly record struct SpeechRecognitionOptions(
     int Threads,
-    int BeamSize = 1,
+    int BeamSize = SpeechDecodingDefaults.BeamSize,
     string? InitialPrompt = null,
-    float TemperatureIncrement = 0.0f)
+    float TemperatureIncrement = SpeechDecodingDefaults.TemperatureIncrement)
 {
     /// <summary>
     /// Japanese meeting speech, punctuated. Without a prompt whisper frequently
@@ -84,19 +109,12 @@ public readonly record struct SpeechRecognitionOptions(
     /// </summary>
     public const string JapaneseMeetingPrompt = "以下は会議の日本語の音声です。句読点を付けて書き起こします。";
 
-    /// <summary>Decoding for the live pass: as fast as possible, shown while the meeting runs.</summary>
-    public static SpeechRecognitionOptions Live(int threads, string language) => new(
+    /// <summary>Decoding for the offline pass: the only pass there is.</summary>
+    public static SpeechRecognitionOptions Offline(int threads, string language) => new(
         threads,
-        BeamSize: 1,
+        BeamSize: SpeechDecodingDefaults.BeamSize,
         InitialPrompt: PromptFor(language),
-        TemperatureIncrement: 0.0f);
-
-    /// <summary>Decoding for the second pass: accuracy, run after recording stops.</summary>
-    public static SpeechRecognitionOptions Accurate(int threads, string language) => new(
-        threads,
-        BeamSize: 5,
-        InitialPrompt: PromptFor(language),
-        TemperatureIncrement: 0.2f);
+        TemperatureIncrement: SpeechDecodingDefaults.TemperatureIncrement);
 
     private static string? PromptFor(string language)
         => string.IsNullOrWhiteSpace(language) || language.StartsWith("ja", StringComparison.OrdinalIgnoreCase)

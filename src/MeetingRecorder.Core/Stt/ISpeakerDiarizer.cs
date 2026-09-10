@@ -13,9 +13,11 @@ namespace MeetingRecorder.Core.Stt;
 /// because a user typed it in.
 /// </para>
 /// <para>
-/// The interface is deliberately incremental so diarization can run on the same
-/// 16 kHz chunk the recognizer just processed. Nothing extra is stored on disk
-/// and no second pass over the meeting audio is needed.
+/// The interface is deliberately incremental so clustering can run on the same
+/// 16 kHz window the recognizer has just finished with, inside
+/// <see cref="OfflineTranscriptionService"/>. It therefore costs a little more
+/// of the wait the user already accepted, and nothing at all while a meeting is
+/// being recorded.
 /// </para>
 /// </remarks>
 public interface ISpeakerDiarizer : IDisposable

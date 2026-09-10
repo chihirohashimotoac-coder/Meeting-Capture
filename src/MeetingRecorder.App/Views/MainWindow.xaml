@@ -21,6 +21,7 @@
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
             <TextBlock Grid.Column="0" Text="会議名" VerticalAlignment="Center" Margin="0,0,8,0" />
@@ -32,7 +33,10 @@
 
             <Button Grid.Column="2" Content="● 録音開始" Command="{Binding StartCommand}" FontWeight="Bold" />
             <Button Grid.Column="3" Content="■ 録音停止" Command="{Binding StopCommand}" />
-            <Button Grid.Column="4" Content="設定" Command="{Binding OpenSettingsCommand}" Margin="0" />
+            <Button Grid.Column="4" Content="音声ファイルをインポート..."
+                    Command="{Binding ImportAudioCommand}"
+                    ToolTip="WAV / MP3 / M4A / AAC を読み込みます。元のファイルは変更しません。" />
+            <Button Grid.Column="5" Content="設定" Command="{Binding OpenSettingsCommand}" Margin="0" />
         </Grid>
 
         <!-- Warning banner -->
@@ -75,7 +79,9 @@
                     <StackPanel>
                         <TextBlock Text="状態" Style="{StaticResource SectionHeader}" />
                         <TextBlock Text="{Binding StateText}" FontSize="20" FontWeight="Bold" Margin="0,0,0,2" />
-                        <TextBlock Text="{Binding ElapsedText}" FontSize="30" FontFamily="Consolas" Margin="0,0,0,16" />
+                        <TextBlock Text="{Binding ElapsedText}" FontSize="30" FontFamily="Consolas" Margin="0,0,0,6" />
+                        <TextBlock Text="{Binding NextStepText}" TextWrapping="Wrap" FontSize="11"
+                                   Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,16" />
 
                         <TextBlock Text="マイク" Style="{StaticResource SectionHeader}" />
                         <Grid Height="16" Margin="0,0,0,2">
@@ -126,9 +132,9 @@
                             </TextBlock.Style>
                         </TextBlock>
 
-                        <TextBlock Text="文字起こし" Style="{StaticResource SectionHeader}" />
-                        <TextBlock Text="{Binding SttLatencyText}" Margin="0,0,0,4" />
-                        <TextBlock Text="{Binding ModelText}" Margin="0,0,0,16"
+                        <TextBlock Text="読み込まれている音声" Style="{StaticResource SectionHeader}" />
+                        <TextBlock Text="{Binding AudioSummaryText}" TextWrapping="Wrap" Margin="0,0,0,4" />
+                        <TextBlock Text="{Binding ModelText}" TextWrapping="Wrap" Margin="0,0,0,16"
                                    Foreground="{StaticResource MutedTextBrush}" />
 
                         <TextBlock Text="保存先" Style="{StaticResource SectionHeader}" />
@@ -154,7 +160,7 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <TextBlock Grid.Row="0" Text="リアルタイム文字起こし（本文は直接編集できます）"
+                <TextBlock Grid.Row="0" Text="文字起こし（録音停止後・またはインポート後に手動で実行します。本文は直接編集できます）"
                            Style="{StaticResource SectionHeader}" />
 
                 <ListBox Grid.Row="1"
@@ -190,7 +196,7 @@
                             <Style TargetType="Grid">
                                 <Setter Property="Visibility" Value="Collapsed" />
                                 <Style.Triggers>
-                                    <DataTrigger Binding="{Binding IsRefining}" Value="True">
+                                    <DataTrigger Binding="{Binding IsTranscribing}" Value="True">
                                         <Setter Property="Visibility" Value="Visible" />
                                     </DataTrigger>
                                 </Style.Triggers>
@@ -201,23 +207,29 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0">
-                            <TextBlock Text="{Binding RefinementStatus}" FontSize="11"
+                            <TextBlock Text="{Binding TranscriptionStatus}" FontSize="11"
                                        Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,2" />
                             <ProgressBar Minimum="0" Maximum="1" Height="6"
-                                         Value="{Binding RefinementProgress, Mode=OneWay}" />
+                                         Value="{Binding TranscriptionProgress, Mode=OneWay}" />
                         </StackPanel>
-                        <Button Grid.Column="1" Content="中止" Command="{Binding CancelRefinementCommand}"
+                        <Button Grid.Column="1" Content="中止" Command="{Binding CancelTranscriptionCommand}"
                                 Margin="10,0,0,0" VerticalAlignment="Bottom" />
                     </Grid>
 
                     <StackPanel Orientation="Horizontal">
+                        <Button Content="文字起こし"
+                                Command="{Binding TranscribeCommand}"
+                                FontWeight="Bold"
+                                MinWidth="140"
+                                ToolTip="録音済みまたはインポート済みの音声を、このPC内で文字起こしします。録音中は実行できません。何度でも実行でき、そのたびに結果が置き換わります。" />
                         <Button Content="文字起こしを保存" Command="{Binding SaveTranscriptCommand}" />
-                        <Button Content="話者名を編集" Command="{Binding RenameSpeakerCommand}" />
-                        <Button Content="高精度で文字起こしをやり直す"
-                                Command="{Binding RefineTranscriptCommand}"
-                                ToolTip="録音済みの音声を、より大きなモデルで最初から文字起こしし直します。録音中は実行できません。"
-                                MinWidth="210" />
-                        <Button Content="議事録を生成（実験的）" Command="{Binding GenerateMinutesCommand}" MinWidth="180" />
+                        <Button Content="話者名を編集"
+                                Command="{Binding RenameSpeakerCommand}"
+                                ToolTip="このアプリで録音した会議のみ。インポートした音声は音源が1つのため話者を特定できません。" />
+                        <Button Content="議事録を生成（実験的）"
+                                Command="{Binding GenerateMinutesCommand}"
+                                ToolTip="文字起こしの結果から作成します。先に文字起こしを実行してください。"
+                                MinWidth="180" />
                     </StackPanel>
                 </StackPanel>
             </Grid>

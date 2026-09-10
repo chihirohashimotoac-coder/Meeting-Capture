@@ -17,8 +17,15 @@ public enum AudioSourceKind
     /// <summary>WASAPI loopback of the Windows render device (remote participants).</summary>
     SystemAudio = 1,
 
-    /// <summary>The mixed, normalized meeting track that is written to disk.</summary>
+    /// <summary>The mixed meeting track that is written to disk.</summary>
     Mixed = 2,
+
+    /// <summary>
+    /// An audio file the user imported. One file, one source: where it came
+    /// from and who is speaking in it are not recorded anywhere, so nothing
+    /// here guesses.
+    /// </summary>
+    Imported = 3,
 }
 
 public static class AudioSourceKindExtensions
@@ -29,6 +36,7 @@ public static class AudioSourceKindExtensions
         AudioSourceKind.Microphone => "マイク",
         AudioSourceKind.SystemAudio => "PC音声",
         AudioSourceKind.Mixed => "ミックス",
+        AudioSourceKind.Imported => "インポート音声",
         _ => "不明",
     };
 }

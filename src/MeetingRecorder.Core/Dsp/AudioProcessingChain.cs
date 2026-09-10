@@ -3,47 +3,44 @@ using MeetingRecorder.Core.Models;
 namespace MeetingRecorder.Core.Dsp;
 
 /// <summary>
-/// The per-stream chain applied to the microphone and to the system-audio leg
-/// independently, before they are mixed:
-/// <c>DC blocker -> soft gate -> loudness normalizer -> compressor -> limiter</c>.
+/// Everything that is done to a capture stream while it is being recorded:
+/// removal of any DC offset, and nothing else.
 /// </summary>
 /// <remarks>
-/// Order matters. The gate runs before the AGC so that background noise cannot
-/// drive the gain; the compressor runs after the AGC so it always sees a signal
-/// near the target loudness and therefore behaves consistently across machines;
-/// the limiter is last because it is the only stage that may not be bypassed -
-/// it is the clipping guarantee.
+/// <para>
+/// This class used to be a chain - soft gate, loudness normalizer, compressor,
+/// limiter. Those stages were there to make a recording pleasant to a human
+/// ear, and every one of them changes gain as a function of time. The audio
+/// this application produces exists to be transcribed, and a speech recognizer
+/// reads exactly the amplitude envelope those stages reshape; the quieter the
+/// talker, the more it is reshaped. They are gone.
+/// </para>
+/// <para>
+/// It is kept as a class, rather than dissolved into a call to
+/// <see cref="DcBlocker"/>, because it is the single place that answers "what
+/// does this application do to my audio?" - and because a test can then assert
+/// that the answer stays "almost nothing".
+/// </para>
 /// </remarks>
 public sealed class AudioProcessingChain
 {
     private readonly AudioProcessingSettings _settings;
     private readonly DcBlocker _dcBlocker;
-    private readonly NoiseGate _gate;
-    private readonly LoudnessNormalizer _normalizer;
-    private readonly Compressor _compressor;
-    private readonly Limiter _limiter;
 
     public AudioProcessingChain(AudioProcessingSettings settings, int sampleRate)
     {
         _settings = settings;
         SampleRate = sampleRate;
-        _dcBlocker = new DcBlocker(sampleRate);
-        _gate = new NoiseGate(settings, sampleRate);
-        _normalizer = new LoudnessNormalizer(settings, sampleRate);
-        _compressor = new Compressor(settings, sampleRate);
-        _limiter = new Limiter(settings, sampleRate);
+        _dcBlocker = new DcBlocker(sampleRate, settings.DcBlockerCutoffHz);
     }
 
     public int SampleRate { get; }
 
-    /// <summary>Processing latency introduced by the chain (limiter look-ahead only).</summary>
-    public int LatencySamples => _limiter.LatencySamples;
-
-    public double CurrentGainDb => _normalizer.CurrentGainDb;
-
-    public double MeasuredRmsDb => _normalizer.MeasuredRmsDb;
-
-    public bool SpeechDetected => _gate.IsOpen;
+    /// <summary>
+    /// Processing latency introduced by the chain. Zero: the DC blocker is a
+    /// first-order recursive filter, so a sample in is a sample out.
+    /// </summary>
+    public int LatencySamples => 0;
 
     /// <summary>Processes a block of mono float samples in place.</summary>
     public void Process(Span<float> buffer)
@@ -52,19 +49,7 @@ public sealed class AudioProcessingChain
         {
             _dcBlocker.Process(buffer);
         }
-
-        _gate.Process(buffer);
-        _normalizer.Process(buffer);
-        _compressor.Process(buffer);
-        _limiter.Process(buffer);
     }
 
-    public void Reset()
-    {
-        _dcBlocker.Reset();
-        _gate.Reset();
-        _normalizer.Reset();
-        _compressor.Reset();
-        _limiter.Reset();
-    }
+    public void Reset() => _dcBlocker.Reset();
 }

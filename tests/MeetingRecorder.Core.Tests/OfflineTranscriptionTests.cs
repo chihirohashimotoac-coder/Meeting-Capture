@@ -8,21 +8,21 @@ using Xunit;
 namespace MeetingRecorder.Core.Tests;
 
 /// <summary>
-/// Covers the second transcription pass: the part that re-reads a finished
-/// meeting and replaces the latency-tuned live transcript with an accurate one.
+/// Covers the only transcription there is: a complete pass over a finished
+/// recording, started because the user asked for it.
 /// </summary>
 /// <remarks>
 /// The recognizer is a test double here, because what has to be right in this
 /// class is the walking, the windowing, the timing arithmetic and the source
-/// attribution - not whisper's output. Whether the accurate settings actually
-/// transcribe better is a property of the model and is measured against real
-/// speech in CI, not asserted here.
+/// attribution - not whisper's output. Whether the model transcribes Japanese
+/// well is a property of the model, measured against real speech in CI and on a
+/// physical machine, not asserted here.
 /// </remarks>
-public sealed class TranscriptionRefinerTests : IDisposable
+public sealed class OfflineTranscriptionTests : IDisposable
 {
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "mr-refine-" + Guid.NewGuid().ToString("N"));
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "mr-offline-stt-" + Guid.NewGuid().ToString("N"));
 
-    public TranscriptionRefinerTests() => Directory.CreateDirectory(_root);
+    public OfflineTranscriptionTests() => Directory.CreateDirectory(_root);
 
     public void Dispose()
     {
@@ -52,44 +52,45 @@ public sealed class TranscriptionRefinerTests : IDisposable
     }
 
     [Fact]
-    public void RefinesBothStreamsAndKeepsTheSourceOfEachSegment()
+    public void TranscribesBothStreamsAndKeepsTheSourceOfEachSegment()
     {
         var mic = WriteAudio(RecognitionAudioNames.Microphone, utterances: 3);
         var system = WriteAudio(RecognitionAudioNames.SystemAudio, utterances: 2);
 
         var recognizer = new FakeSpeechRecognizer();
-        var refined = new TranscriptionRefiner().Refine(
+        var segments = new OfflineTranscriptionService().Transcribe(
             RecognitionAudioNames.SourcesIn(_root),
             recognizer,
             "ja");
 
-        Assert.NotEmpty(refined);
+        Assert.NotEmpty(segments);
 
         // Source is the file a segment came from. Mixing the streams would make
         // it a guess, which is exactly what this design refuses to do.
-        Assert.Contains(refined, s => s.Source == AudioSourceKind.Microphone);
-        Assert.Contains(refined, s => s.Source == AudioSourceKind.SystemAudio);
+        Assert.Contains(segments, s => s.Source == AudioSourceKind.Microphone);
+        Assert.Contains(segments, s => s.Source == AudioSourceKind.SystemAudio);
 
         // Times are absolute within the meeting, and ordered.
-        Assert.True(refined[0].StartMs >= 0);
-        for (var i = 1; i < refined.Count; i++)
+        Assert.True(segments[0].StartMs >= 0);
+        for (var i = 1; i < segments.Count; i++)
         {
-            Assert.True(refined[i].StartMs >= refined[i - 1].StartMs, "segments must come back in time order");
+            Assert.True(segments[i].StartMs >= segments[i - 1].StartMs, "segments must come back in time order");
         }
     }
 
     [Fact]
-    public void UsesWindowsFarLongerThanTheLivePassDoes()
+    public void UsesWindowsCloseToWhispersFullReceptiveField()
     {
-        // The point of the second pass is context: whisper was trained on 30
-        // second windows and a four second one throws most of that away. If this
-        // ever regresses to live-pass chunk sizes the pass stops being worth its
-        // runtime, and nothing else would notice.
+        // Context is what makes this pass worth its runtime: whisper was
+        // trained on 30 second windows and a four second one throws most of that
+        // away. The old live pass used four seconds because a caption was
+        // waiting; nothing is waiting now, and if this ever regresses to those
+        // window sizes the accuracy would quietly drop with it.
         var mic = WriteAudio(RecognitionAudioNames.Microphone, utterances: 6, speechSeconds: 3.0, gapSeconds: 0.9);
 
         var recognizer = new FakeSpeechRecognizer();
-        new TranscriptionRefiner().Refine(
-            new[] { new RefinementSource(mic, AudioSourceKind.Microphone) },
+        new OfflineTranscriptionService().Transcribe(
+            new[] { new TranscriptionSource(mic, AudioSourceKind.Microphone) },
             recognizer,
             "ja");
 
@@ -101,7 +102,7 @@ public sealed class TranscriptionRefinerTests : IDisposable
 
         Assert.NotEmpty(windows);
         var longest = windows.Max() / (double)SpeechConstants.SampleRate;
-        Assert.True(longest > 10.0, $"the longest window was only {longest:F1}s; the second pass should batch far more than that");
+        Assert.True(longest > 10.0, $"the longest window was only {longest:F1}s; an offline pass should batch far more than that");
 
         // ...and never longer than whisper's receptive field, which would be
         // truncated by the engine without telling anyone.
@@ -119,14 +120,14 @@ public sealed class TranscriptionRefinerTests : IDisposable
             new() { StartMs = 0, EndMs = 60_000, Source = AudioSourceKind.Microphone, SpeakerName = "田中", SpeakerId = 1, Text = "旧" },
         };
 
-        var refined = new TranscriptionRefiner().Refine(
-            new[] { new RefinementSource(mic, AudioSourceKind.Microphone) },
+        var segments = new OfflineTranscriptionService().Transcribe(
+            new[] { new TranscriptionSource(mic, AudioSourceKind.Microphone) },
             new FakeSpeechRecognizer(),
             "ja",
             previous);
 
         // Re-transcribing must not throw away work a human did by hand.
-        Assert.All(refined, segment => Assert.Equal("田中", segment.SpeakerName));
+        Assert.All(segments, segment => Assert.Equal("田中", segment.SpeakerName));
     }
 
     [Fact]
@@ -139,29 +140,29 @@ public sealed class TranscriptionRefinerTests : IDisposable
             new() { StartMs = 0, EndMs = 60_000, Source = AudioSourceKind.Microphone, SpeakerName = "田中", Text = "旧" },
         };
 
-        var refined = new TranscriptionRefiner().Refine(
-            new[] { new RefinementSource(system, AudioSourceKind.SystemAudio) },
+        var segments = new OfflineTranscriptionService().Transcribe(
+            new[] { new TranscriptionSource(system, AudioSourceKind.SystemAudio) },
             new FakeSpeechRecognizer(),
             "ja",
             previous);
 
         // A name attached to the room microphone says nothing about who was
         // speaking on the far end of the call.
-        Assert.All(refined, segment => Assert.Null(segment.SpeakerName));
+        Assert.All(segments, segment => Assert.Null(segment.SpeakerName));
     }
 
     [Fact]
     public void ReportsProgressThatEndsAtOne()
     {
         var mic = WriteAudio(RecognitionAudioNames.Microphone, utterances: 4);
-        var reports = new List<RefinementProgress>();
+        var reports = new List<TranscriptionProgress>();
 
-        new TranscriptionRefiner().Refine(
-            new[] { new RefinementSource(mic, AudioSourceKind.Microphone) },
+        new OfflineTranscriptionService().Transcribe(
+            new[] { new TranscriptionSource(mic, AudioSourceKind.Microphone) },
             new FakeSpeechRecognizer(),
             "ja",
             previous: null,
-            progress: new Progress<RefinementProgress>(p =>
+            progress: new Progress<TranscriptionProgress>(p =>
             {
                 lock (reports)
                 {
@@ -180,7 +181,7 @@ public sealed class TranscriptionRefinerTests : IDisposable
                 }
             },
             TimeSpan.FromSeconds(5)),
-            "the refiner should finish by reporting complete progress");
+            "transcription should finish by reporting complete progress");
     }
 
     [Fact]
@@ -196,8 +197,8 @@ public sealed class TranscriptionRefinerTests : IDisposable
         // running the suite happens to be.
         var recognizer = new CancellingRecognizer(cts);
 
-        Assert.Throws<OperationCanceledException>(() => new TranscriptionRefiner().Refine(
-            new[] { new RefinementSource(mic, AudioSourceKind.Microphone) },
+        Assert.Throws<OperationCanceledException>(() => new OfflineTranscriptionService().Transcribe(
+            new[] { new TranscriptionSource(mic, AudioSourceKind.Microphone) },
             recognizer,
             "ja",
             previous: null,
@@ -210,8 +211,8 @@ public sealed class TranscriptionRefinerTests : IDisposable
         using var precancelled = new CancellationTokenSource();
         precancelled.Cancel();
 
-        Assert.Throws<OperationCanceledException>(() => new TranscriptionRefiner().Refine(
-            new[] { new RefinementSource(mic, AudioSourceKind.Microphone) },
+        Assert.Throws<OperationCanceledException>(() => new OfflineTranscriptionService().Transcribe(
+            new[] { new TranscriptionSource(mic, AudioSourceKind.Microphone) },
             new FakeSpeechRecognizer(),
             "ja",
             previous: null,
@@ -220,15 +221,63 @@ public sealed class TranscriptionRefinerTests : IDisposable
     }
 
     [Fact]
-    public void SaysSoWhenThereIsNoAudioToRefine()
+    public void SaysSoWhenThereIsNoAudioToTranscribe()
     {
-        var error = Assert.Throws<FileNotFoundException>(() => new TranscriptionRefiner().Refine(
+        var error = Assert.Throws<FileNotFoundException>(() => new OfflineTranscriptionService().Transcribe(
             RecognitionAudioNames.SourcesIn(_root),
             new FakeSpeechRecognizer(),
             "ja"));
 
         // The user needs to know this is a setting they can change, not a defect.
-        Assert.Contains("録音時", error.Message);
+        Assert.Contains("文字起こし用の音声を保存する", error.Message);
+    }
+
+    [Fact]
+    public void TagsEverySegmentOfAnImportedFileAsImportedAndNamesNoSpeaker()
+    {
+        // One imported file is one anonymous source. Labelling it "microphone",
+        // or attaching a speaker to it, would be an invention.
+        var path = Path.Combine(_root, RecognitionAudioNames.Imported);
+        using (var writer = new WavFileWriter(path, SpeechConstants.SampleRate))
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                writer.Write(SignalGenerator.Sine(300, 2.0, SpeechConstants.SampleRate, 0.35));
+                writer.Write(SignalGenerator.Silence(1.2, SpeechConstants.SampleRate));
+            }
+
+            writer.Flush();
+        }
+
+        var sources = RecognitionAudioNames.SourcesIn(_root);
+        Assert.Single(sources);
+        Assert.Equal(AudioSourceKind.Imported, sources[0].Source);
+
+        var segments = new OfflineTranscriptionService().Transcribe(sources, new FakeSpeechRecognizer(), "ja");
+
+        Assert.NotEmpty(segments);
+        Assert.All(segments, s => Assert.Equal(AudioSourceKind.Imported, s.Source));
+        Assert.All(segments, s => Assert.Null(s.SpeakerId));
+        Assert.All(segments, s => Assert.Null(s.SpeakerName));
+        Assert.All(segments, s => Assert.Equal("インポート音声", s.SourceLabel()));
+    }
+
+    [Fact]
+    public void ClustersSpeakersOnlyWhenADiarizerIsSupplied()
+    {
+        var mic = WriteAudio(RecognitionAudioNames.Microphone, utterances: 3);
+        var sources = new[] { new TranscriptionSource(mic, AudioSourceKind.Microphone) };
+
+        var without = new OfflineTranscriptionService().Transcribe(sources, new FakeSpeechRecognizer(), "ja");
+        Assert.All(without, s => Assert.Null(s.SpeakerId));
+
+        using var diarizer = new FakeDiarizer();
+        var with = new OfflineTranscriptionService().Transcribe(
+            sources, new FakeSpeechRecognizer(), "ja", previous: null, progress: null, diarizer: diarizer);
+
+        Assert.NotEmpty(with);
+        Assert.Contains(with, s => s.SpeakerId.HasValue);
+        Assert.True(diarizer.Calls > 0, "the diarizer should have been asked about the recognized spans");
     }
 
     [Fact]
@@ -244,10 +293,30 @@ public sealed class TranscriptionRefinerTests : IDisposable
             writer.Flush();
         }
 
-        Assert.Throws<InvalidDataException>(() => new TranscriptionRefiner().Refine(
-            new[] { new RefinementSource(path, AudioSourceKind.Microphone) },
+        Assert.Throws<InvalidDataException>(() => new OfflineTranscriptionService().Transcribe(
+            new[] { new TranscriptionSource(path, AudioSourceKind.Microphone) },
             new FakeSpeechRecognizer(),
             "ja"));
+    }
+
+    /// <summary>Assigns a cluster to anything long enough, and counts the calls.</summary>
+    private sealed class FakeDiarizer : ISpeakerDiarizer
+    {
+        public bool IsEnabled { get; set; } = true;
+
+        public int Calls { get; private set; }
+
+        public int? Identify(AudioSourceKind source, ReadOnlySpan<float> samples16k)
+        {
+            Calls++;
+            return 0;
+        }
+
+        public void Reset() => Calls = 0;
+
+        public void Dispose()
+        {
+        }
     }
 
     /// <summary>Cancels the walk from inside the first window it is asked to decode.</summary>

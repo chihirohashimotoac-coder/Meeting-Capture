@@ -2,7 +2,7 @@ using MeetingRecorder.Core.Models;
 
 namespace MeetingRecorder.App.ViewModels;
 
-/// <summary>One editable line of the live transcript.</summary>
+/// <summary>One editable line of the transcript.</summary>
 public sealed class TranscriptItemViewModel : ObservableObject
 {
     private string _text;

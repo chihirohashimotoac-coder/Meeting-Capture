@@ -4,13 +4,14 @@ using MeetingRecorder.Core.Persistence;
 namespace MeetingRecorder.Core.Pipeline;
 
 /// <summary>
-/// The live transcript: thread-safe, journal-backed, and editable by the user.
+/// The transcript: thread-safe, journal-backed, and editable by the user.
 /// </summary>
 /// <remarks>
-/// Segments arrive on the transcription worker thread and are read by the UI
+/// Segments arrive on whichever thread is transcribing and are read by the UI
 /// thread, so every mutation takes the lock and every read returns a snapshot.
-/// Every mutation is also appended to the recovery journal, which is what makes
-/// an interrupted meeting recoverable down to the last recognized sentence.
+/// Every mutation is also appended to the recovery journal while one is
+/// attached, which is what makes an edit made to a recovered meeting survive a
+/// second interruption.
 /// </remarks>
 public sealed class TranscriptStore
 {
@@ -75,9 +76,9 @@ public sealed class TranscriptStore
     }
 
     /// <summary>
-    /// Swaps the whole transcript for a new one. Used by the second
-    /// transcription pass, which produces its own segmentation rather than
-    /// editing the live one.
+    /// Swaps the whole transcript for a new one. Used when a transcription
+    /// finishes: it produces its own segmentation rather than editing whatever
+    /// was on screen, so the two are never interleaved.
     /// </summary>
     /// <remarks>
     /// Raised as removals followed by additions so any view bound to the events
