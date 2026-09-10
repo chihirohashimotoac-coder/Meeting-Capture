@@ -224,23 +224,25 @@ public sealed class DiagnosticsCollector
         var capability = CapabilityProbe.Measure();
         var profile = ProfileSelector.Select(capability);
         var model = ModelCatalog.RequireSpeechModel(profile.SttModelId);
-        var estimated = ProfileSelector.EstimateRealTimeFactor(model, capability);
+        var estimated = ProfileSelector.EstimateProcessingFactor(model, capability);
 
         var saved = settings.Profile is null
             ? "（保存済みプロファイルなし）"
             : $"（保存済み: {settings.Profile.SttModelId} / スレッド {settings.Profile.SttThreads}）";
 
+        // Recording is never the thing at risk here - it does not use the model,
+        // the threads or the clustering this check reports on. What a slow
+        // machine costs is time spent waiting for a transcription that was
+        // started deliberately, so this is information, not an alarm.
         report.Checks.Add(new DiagnosticCheck(
             "D-06",
             "PC性能の実測と自動設定",
-            estimated <= ProfileSelector.TargetRealTimeFactor ? DiagnosticStatus.Ok : DiagnosticStatus.Warning,
+            DiagnosticStatus.Ok,
             string.Create(CultureInfo.InvariantCulture,
-                $"実測スコア {capability.MultiThreadScore:F2} / 推定RTF {estimated:F2} / 選択モデル {model.DisplayName} "
-                + $"/ スレッド {profile.SttThreads} / 話者分離 {(profile.DiarizationEnabled ? "有効" : "無効")} {saved}"),
-            estimated <= ProfileSelector.TargetRealTimeFactor
-                ? string.Empty
-                : "このPCではリアルタイム文字起こしが遅れる可能性があります。録音は影響を受けませんが、"
-                  + "文字起こしは録音停止後もしばらく処理が続きます。"));
+                $"実測スコア {capability.MultiThreadScore:F2} / 選択モデル {model.DisplayName} "
+                + $"/ 推定処理時間 音声長の約 {estimated:F1} 倍 / スレッド {profile.SttThreads} "
+                + $"/ 話者分離 {(profile.DiarizationEnabled ? "有効" : "無効")} {saved}"),
+            string.Empty));
     }
 
     private void AddModels(DiagnosticReport report, AppSettings settings)

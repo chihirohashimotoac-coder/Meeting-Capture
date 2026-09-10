@@ -46,37 +46,46 @@
                 <TextBlock x:Name="Mp3AvailabilityText" FontSize="11"
                            Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,18" />
 
-                <TextBlock Text="文字起こし（完全ローカル処理）" Style="{StaticResource SectionHeader}" FontSize="15" />
+                <TextBlock Text="文字起こし（完全ローカル処理・録音後に手動で実行）" Style="{StaticResource SectionHeader}" FontSize="15" />
 
-                <CheckBox x:Name="SttEnabledCheck" Content="リアルタイム文字起こしを有効にする" Margin="0,6,0,10" />
+                <TextBlock Text="録音中に文字起こしは行いません。録音を停止したあと、または音声ファイルをインポートしたあとに「文字起こし」を押したときだけ実行します。"
+                           TextWrapping="Wrap" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}" Margin="0,6,0,8" />
 
-                <TextBlock Text="使用するモデル" Margin="0,0,0,4" />
-                <ComboBox x:Name="ModelCombo" DisplayMemberPath="Label" Margin="0,0,0,8" />
+                <CheckBox x:Name="SttEnabledCheck" Content="文字起こし機能を使う" Margin="0,0,0,10" />
+
+                <TextBlock Text="文字起こしに使用するモデル" Margin="0,0,0,4" />
+                <ComboBox x:Name="ModelCombo" DisplayMemberPath="Label" Margin="0,0,0,4" />
+                <TextBlock x:Name="ModelEstimateText" TextWrapping="Wrap" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,8" />
 
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                     <Button Content="モデルをダウンロード" Click="OnDownloadModel" MinWidth="170" />
                     <Button Content="PC性能を測定して自動設定" Click="OnBenchmark" MinWidth="200" Margin="0" />
                 </StackPanel>
 
-                <TextBlock x:Name="ProfileText" FontSize="11" Foreground="{StaticResource MutedTextBrush}"
-                           Margin="0,0,0,12" />
+                <TextBlock x:Name="ProfileText" TextWrapping="Wrap" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}" Margin="0,0,0,12" />
 
-                <CheckBox x:Name="RefineCheck" Margin="0,0,0,4"
-                          Content="録音停止後に、より高精度なモデルで文字起こしをやり直す" />
-                <TextBlock Text="録音中の文字起こしは速報として素早く表示し、停止後に本文を精度優先で作り直します。録音中は1ストリームあたり毎時約115MBの作業用音声を会議フォルダーに保存します。"
+                <CheckBox x:Name="KeepRecognitionAudioCheck" Margin="0,0,0,4"
+                          Content="文字起こし用の音声を保存する（マイクとPC音声を別々に保持）" />
+                <TextBlock Text="録音中に、マイクとPC内部音声を1系統あたり毎時およそ115MBの作業用音声として会議フォルダーに保存します。混ぜてしまうと発言元の区別は二度と復元できないため、この保存を切ると録音後の文字起こしはできません（録音そのものは通常どおり行われます）。"
                            TextWrapping="Wrap" FontSize="11"
                            Foreground="{StaticResource MutedTextBrush}" Margin="20,0,0,6" />
 
-                <CheckBox x:Name="DeleteRecognitionAudioCheck" Margin="20,0,0,6"
-                          Content="やり直しが終わったら作業用音声を削除する" />
-
-                <TextBlock x:Name="RefinementModelText" FontSize="11"
-                           Foreground="{StaticResource MutedTextBrush}" Margin="20,0,0,18" />
+                <CheckBox x:Name="DeleteRecognitionAudioCheck" Margin="20,0,0,4"
+                          Content="文字起こしが完了したら作業用音声を削除する" />
+                <TextBlock Text="正常に完了したときだけ削除します。失敗・中止のときは削除しません。削除すると、別のモデルでの再文字起こしはできなくなります（インポートした音声は、元のファイルが残っていれば作り直せます）。"
+                           TextWrapping="Wrap" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}" Margin="36,0,0,18" />
 
                 <TextBlock Text="実験的機能" Style="{StaticResource SectionHeader}" FontSize="15" />
 
-                <CheckBox x:Name="DiarizationCheck" Margin="0,6,0,6"
-                          Content="話者分離を有効にする（PC音声側の話者をSpeaker 1/2...に分類。精度は限定的です）" />
+                <CheckBox x:Name="DiarizationCheck" Margin="0,6,0,4"
+                          Content="話者分離を有効にする（文字起こし時に実行。精度は限定的です）" />
+                <TextBlock Text="このアプリで録音した会議でのみ動作し、文字起こしの実行中に行われます（録音中は実行しません）。インポートした音声は音源が1つのため、話者の推定は行いません。"
+                           TextWrapping="Wrap" FontSize="11"
+                           Foreground="{StaticResource MutedTextBrush}" Margin="20,0,0,8" />
                 <CheckBox x:Name="MinutesCheck" Margin="0,0,0,8"
                           Content="ローカルLLMによる議事録生成を有効にする（録音停止後に手動実行）" />
 

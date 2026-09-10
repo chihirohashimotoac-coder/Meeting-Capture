@@ -64,9 +64,13 @@ public sealed class WavFileWriter : IAudioFileWriter
             var byteCount = 0;
             for (var i = 0; i < take; i++)
             {
-                // Clamp defensively: the limiter should already guarantee this,
-                // but a wrapped sample is an audible click in an archived
-                // meeting and there is no second chance to fix it.
+                // Nothing that reaches this writer should ever be out of range:
+                // the mixer's constant -6 dB makes a full-scale sum impossible
+                // and the peak normalizer picks a gain that lands under the
+                // target. This is the arithmetic backstop for a NaN or a stray
+                // float, not a clipping strategy - a wrapped sample is an
+                // audible click in an archived meeting and there is no second
+                // chance to fix it. The DSP tests assert it never engages.
                 var value = samples[offset + i];
                 if (value > 1f)
                 {

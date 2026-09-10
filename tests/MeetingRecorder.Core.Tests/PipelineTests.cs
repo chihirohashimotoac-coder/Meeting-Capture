@@ -37,9 +37,11 @@ public sealed class PipelineTests : IDisposable
         SaveRoot = _root,
         ModelDirectory = Path.Combine(_root, "models"),
         SttEnabled = true,
+        KeepRecognitionAudio = true,
         AutoSaveIntervalSeconds = 5,
-        Profile = new PerformanceProfile { ChunkSeconds = 2.0 },
     };
+
+    private static RecordingPipelineOptions Options() => new();
 
     [Fact]
     public void RecordsBothStreamsIntoOneMixedFileOfTheRightLength()
@@ -49,16 +51,13 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Sine(880, 1.0, 48000, 0.3));
 
         var transcript = new TranscriptStore();
-        using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { TranscriptionEnabled = false },
-            factory,
-            transcript);
+        using var pipeline = new RecordingPipeline(Options(), factory, transcript);
 
         var path = Path.Combine(_root, "meeting.wav");
-        pipeline.Start(path, CreateSettings(), null, null, Path.Combine(_root, "spill"));
+        pipeline.Start(path, CreateSettings(), null);
 
         Thread.Sleep(2000);
-        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+        var result = pipeline.Stop();
 
         Assert.InRange(result.Duration.TotalSeconds, 1.5, 3.0);
 
@@ -73,29 +72,71 @@ public sealed class PipelineTests : IDisposable
     }
 
     [Fact]
+    public void StartingARecordingNeverTouchesASpeechRecognizer()
+    {
+        // The requirement in its most direct form. RecordingPipeline.Start takes
+        // no recognizer and no diarizer because there is nowhere in the class
+        // that could use one; this asserts that the signature stays that way, so
+        // a future change has to be deliberate rather than accidental.
+        var parameters = typeof(RecordingPipeline)
+            .GetMethod(nameof(RecordingPipeline.Start))!
+            .GetParameters();
+
+        Assert.DoesNotContain(parameters, p => typeof(ISpeechRecognizer).IsAssignableFrom(p.ParameterType));
+        Assert.DoesNotContain(parameters, p => typeof(ISpeakerDiarizer).IsAssignableFrom(p.ParameterType));
+
+        // And no field of the pipeline holds one either, which is what would let
+        // it acquire a recognizer by some other route.
+        var fields = typeof(RecordingPipeline)
+            .GetFields(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            .Select(f => f.FieldType)
+            .ToList();
+
+        Assert.DoesNotContain(fields, f => typeof(ISpeechRecognizer).IsAssignableFrom(f));
+        Assert.DoesNotContain(fields, f => typeof(ISpeakerDiarizer).IsAssignableFrom(f));
+    }
+
+    [Fact]
+    public void NoInferenceHappensDuringARecordingOrWhenItStops()
+    {
+        // A recognizer that fails the test if it is ever called. Recording an
+        // entire meeting and stopping it must not reach it once - not while
+        // capturing, and not on the way out either.
+        var recognizer = new ForbiddenRecognizer();
+        var factory = new FakeCaptureFactory();
+
+        using var manager = new MeetingSessionManager(factory);
+        var folder = manager.Start(CreateSettings(), "no-inference");
+        Thread.Sleep(1500);
+        var summary = manager.Stop();
+
+        Assert.Equal(0, recognizer.Calls);
+        Assert.Empty(manager.Transcript.Snapshot());
+
+        // Stopping produced audio and stopped there.
+        Assert.True(File.Exists(summary.AudioPath));
+        Assert.True(summary.CanTranscribe, "the working audio should be ready for a transcription the user asks for");
+    }
+
+    [Fact]
     public void MutingTheMicrophoneRecordsPcAudioOnly()
     {
         var factory = new FakeCaptureFactory(
             SignalGenerator.Sine(220, 1.0, 48000, 0.35),
             SignalGenerator.Sine(660, 1.0, 48000, 0.35));
 
-        var recognizer = new FakeSpeechRecognizer();
-        var transcript = new TranscriptStore();
-
-        using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { Profile = new PerformanceProfile { ChunkSeconds = 1.0 } },
-            factory,
-            transcript);
+        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
 
         var settings = CreateSettings();
         settings.MicrophoneMuted = true;
 
+        var recognitionDirectory = Path.Combine(_root, "pc-only-recognition");
         var path = Path.Combine(_root, "pc-only.wav");
-        pipeline.Start(path, settings, recognizer, null, Path.Combine(_root, "spill"));
+        pipeline.Start(path, settings, null, recognitionDirectory);
 
         Assert.True(pipeline.MicrophoneMuted);
         Thread.Sleep(2500);
-        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+        var result = pipeline.Stop();
 
         // The recording still runs for the full wall-clock time - muting one leg
         // must not shorten the meeting.
@@ -104,10 +145,10 @@ public sealed class PipelineTests : IDisposable
         using var reader = new WavFileReader(path);
         Assert.True(AudioMath.Rms(reader.ReadAllMono()) > 0.02, "PC audio should still be recorded");
 
-        // Nothing from the muted leg may reach the transcript either.
-        var segments = transcript.Snapshot();
-        Assert.NotEmpty(segments);
-        Assert.All(segments, segment => Assert.Equal(AudioSourceKind.SystemAudio, segment.Source));
+        // Nothing from the muted leg reaches the working audio either, so it
+        // cannot come back later as a transcript.
+        using var micAudio = new WavFileReader(Path.Combine(recognitionDirectory, RecognitionAudioNames.Microphone));
+        Assert.True(AudioMath.Peak(micAudio.ReadAllMono()) < 0.001, "a muted leg must not be kept for transcription");
     }
 
     [Fact]
@@ -117,20 +158,17 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Sine(220, 1.0, 48000, 0.4),
             SignalGenerator.Sine(660, 1.0, 48000, 0.4));
 
-        using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { TranscriptionEnabled = false },
-            factory,
-            new TranscriptStore());
+        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
 
         var settings = CreateSettings();
         settings.MicrophoneMuted = true;
         settings.SystemAudioMuted = true;
 
         var path = Path.Combine(_root, "both-muted.wav");
-        pipeline.Start(path, settings, null, null, Path.Combine(_root, "spill"));
+        pipeline.Start(path, settings, null);
 
         Thread.Sleep(1500);
-        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+        var result = pipeline.Stop();
 
         // Muting everything is a user's choice, not an error: the timeline stays
         // honest and the file is silence rather than a truncated recording.
@@ -149,19 +187,16 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Sine(220, 1.0, 48000, 0.4),
             SignalGenerator.Silence(1.0, 48000));
 
-        using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { TranscriptionEnabled = false },
-            factory,
-            new TranscriptStore());
+        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
 
         var path = Path.Combine(_root, "toggled.wav");
-        pipeline.Start(path, CreateSettings(), null, null, Path.Combine(_root, "spill"));
+        pipeline.Start(path, CreateSettings(), null);
 
         Thread.Sleep(1200);
         pipeline.MicrophoneMuted = true;
         Thread.Sleep(1200);
 
-        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+        var result = pipeline.Stop();
         Assert.True(pipeline.MicrophoneMuted);
 
         using var reader = new WavFileReader(path);
@@ -175,112 +210,77 @@ public sealed class PipelineTests : IDisposable
     }
 
     [Fact]
-    public void RecognitionReceivesTheCapturedAudioRatherThanTheProcessedMix()
+    public void TheWorkingAudioIsTheCapturedAudioRatherThanAProcessedVersionOfIt()
     {
-        // The listening chain gates, normalizes, compresses and limits - right for
-        // a human ear, wrong for the recognizer, which reads the spectral shape
-        // those stages reshape. This feeds a signal well above the normalizer's
-        // -20 dBFS target so the chain has to pull it down hard, then checks what
-        // each side ended up with. A loud tone rather than a quiet one because the
-        // VAD needs to fire for any audio to reach the recognizer at all.
-        const double loudAmplitude = 0.9; // about -3.9 dBFS RMS for a sine
-        const double sourceLevelDb = -3.9;
+        // What reaches the recognizer later has to be what the microphone
+        // produced. The mixer's constant -6 dB applies to the file only; the
+        // per-stream working audio is written before it, so a tone at a known
+        // level comes back at that level.
+        const double amplitude = 0.5;
 
         var factory = new FakeCaptureFactory(
-            SignalGenerator.Sine(220, 1.0, 48000, loudAmplitude),
+            SignalGenerator.Sine(220, 1.0, 48000, amplitude),
             SignalGenerator.Silence(1.0, 48000));
 
-        var recognizer = new FakeSpeechRecognizer();
+        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
 
-        using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { Profile = new PerformanceProfile { ChunkSeconds = 1.0 } },
-            factory,
-            new TranscriptStore());
+        var recognitionDirectory = Path.Combine(_root, "fidelity");
+        pipeline.Start(Path.Combine(_root, "fidelity.wav"), CreateSettings(), null, recognitionDirectory);
+        Thread.Sleep(2000);
+        pipeline.Stop();
 
-        var path = Path.Combine(_root, "quiet.wav");
-        pipeline.Start(path, CreateSettings(), recognizer, null, Path.Combine(_root, "spill"));
+        using var micAudio = new WavFileReader(Path.Combine(recognitionDirectory, RecognitionAudioNames.Microphone));
+        var samples = micAudio.ReadAllMono();
 
-        Thread.Sleep(3000);
-        pipeline.Stop(TimeSpan.FromSeconds(10));
+        // Skip the resampler's warm-up.
+        var rms = AudioMath.Rms(samples.AsSpan(4000, samples.Length - 8000));
+        var expected = amplitude / Math.Sqrt(2);
 
-        double[] received;
-        lock (recognizer.ReceivedSampleCounts)
-        {
-            received = recognizer.ReceivedRmsDb.ToArray();
-        }
-
-        Assert.NotEmpty(received);
-        var recognizerLevel = received.Max();
-
-        using var reader = new WavFileReader(path);
-        var fileLevel = AudioMath.LinearToDb(AudioMath.Rms(reader.ReadAllMono()));
-
-        // The recognizer sees the audio as captured: had it come through the
-        // chain, it could not still be sitting at the source level.
-        Assert.True(
-            Math.Abs(recognizerLevel - sourceLevelDb) < 1.5,
-            $"the recognizer should see the captured level ({sourceLevelDb:F1} dBFS) "
-            + $"but saw {recognizerLevel:F1} dBFS");
-
-        // The file, meanwhile, has been pulled down towards the listening target.
-        Assert.True(
-            fileLevel < recognizerLevel - 8.0,
-            $"the recorded file ({fileLevel:F1} dBFS) should be well below the captured level, "
-            + $"otherwise the two paths are not actually separate");
+        Assert.InRange(rms, expected * 0.9, expected * 1.1);
     }
 
     [Fact]
-    public void KeepsPerStreamRecognitionAudioWhenTheSecondPassWillWantIt()
+    public void KeepsPerStreamWorkingAudioForBothLegs()
     {
         var factory = new FakeCaptureFactory(
             SignalGenerator.Sine(220, 1.0, 48000, 0.35),
             SignalGenerator.Sine(660, 1.0, 48000, 0.35));
 
-        using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { Profile = new PerformanceProfile { ChunkSeconds = 1.0 } },
-            factory,
-            new TranscriptStore());
+        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
 
         var recognitionDirectory = Path.Combine(_root, "recognition");
-        var path = Path.Combine(_root, "with-recognition-audio.wav");
+        var path = Path.Combine(_root, "with-working-audio.wav");
 
-        pipeline.Start(
-            path,
-            CreateSettings(),
-            new FakeSpeechRecognizer(),
-            null,
-            Path.Combine(_root, "spill"),
-            diarizer: null,
-            recognitionAudioDirectory: recognitionDirectory);
+        pipeline.Start(path, CreateSettings(), null, recognitionDirectory);
 
         Thread.Sleep(2000);
-        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+        var result = pipeline.Stop();
 
         Assert.Equal(recognitionDirectory, result.RecognitionAudioDirectory);
-        Assert.True(RecognitionAudioNames.ExistIn(recognitionDirectory));
+        Assert.True(RecognitionAudioNames.HasPerStreamAudio(recognitionDirectory));
 
-        // Written at the engine's rate, not the capture rate: this is the audio
-        // the recognizer saw, so the second pass reads exactly what the first did.
-        using var micAudio = new WavFileReader(Path.Combine(recognitionDirectory, RecognitionAudioNames.Microphone));
-        Assert.Equal(SpeechConstants.SampleRate, micAudio.SampleRate);
-        Assert.InRange(micAudio.DurationSeconds, 1.5, 3.0);
-        Assert.True(AudioMath.Rms(micAudio.ReadAllMono()) > 0.05, "the microphone stream should be in its own file");
+        // Written at the engine's rate, one file per capture stream: this is what
+        // keeps "microphone" and "PC audio" a recorded fact rather than a guess.
+        foreach (var name in new[] { RecognitionAudioNames.Microphone, RecognitionAudioNames.SystemAudio })
+        {
+            using var audio = new WavFileReader(Path.Combine(recognitionDirectory, name));
+            Assert.Equal(SpeechConstants.SampleRate, audio.SampleRate);
+            Assert.InRange(audio.DurationSeconds, 1.5, 3.0);
+            Assert.True(AudioMath.Rms(audio.ReadAllMono()) > 0.05, $"{name} should carry its own stream");
+        }
     }
 
     [Fact]
-    public void KeepsNoRecognitionAudioWhenTheSecondPassIsOff()
+    public void KeepsNoWorkingAudioWhenTranscriptionIsTurnedOff()
     {
         var factory = new FakeCaptureFactory();
-        using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { Profile = new PerformanceProfile { ChunkSeconds = 1.0 } },
-            factory,
-            new TranscriptStore());
+        using var pipeline = new RecordingPipeline(Options(), factory, new TranscriptStore());
 
-        var path = Path.Combine(_root, "no-recognition-audio.wav");
-        pipeline.Start(path, CreateSettings(), new FakeSpeechRecognizer(), null, Path.Combine(_root, "spill"));
+        var path = Path.Combine(_root, "no-working-audio.wav");
+        pipeline.Start(path, CreateSettings(), null);
 
         Thread.Sleep(1200);
-        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+        var result = pipeline.Stop();
 
         // 115 MB per hour per stream is not something to spend without being
         // asked: no directory, no copies.
@@ -295,15 +295,15 @@ public sealed class PipelineTests : IDisposable
         var transcript = new TranscriptStore();
 
         using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { TranscriptionEnabled = false },
+            Options(),
             factory,
             transcript);
 
         var path = Path.Combine(_root, "mic-only.wav");
-        pipeline.Start(path, CreateSettings(), null, null, Path.Combine(_root, "spill"));
+        pipeline.Start(path, CreateSettings(), null);
 
         Thread.Sleep(1200);
-        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+        var result = pipeline.Stop();
 
         Assert.True(result.Duration.TotalSeconds > 0.8);
         Assert.Contains(result.Warnings, w => w.Contains("PC内部音声"));
@@ -324,15 +324,15 @@ public sealed class PipelineTests : IDisposable
             microphoneStartFailure: new UnauthorizedAccessException("Access is denied. (0x80070005 (E_ACCESSDENIED))"));
 
         using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { TranscriptionEnabled = false },
+            Options(),
             factory,
             new TranscriptStore());
 
         var path = Path.Combine(_root, "denied-mic.wav");
-        pipeline.Start(path, CreateSettings(), null, null, Path.Combine(_root, "spill"));
+        pipeline.Start(path, CreateSettings(), null);
 
         Thread.Sleep(1200);
-        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+        var result = pipeline.Stop();
 
         Assert.True(result.Duration.TotalSeconds > 0.8, "PC audio must keep recording when the microphone is denied");
         Assert.Contains(result.Warnings, w => w.Contains("マイク"));
@@ -352,12 +352,12 @@ public sealed class PipelineTests : IDisposable
             systemStartFailure: new InvalidOperationException("The endpoint is in use."));
 
         using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { TranscriptionEnabled = false },
+            Options(),
             factory,
             new TranscriptStore());
 
         var error = Assert.Throws<InvalidOperationException>(() =>
-            pipeline.Start(Path.Combine(_root, "neither.wav"), CreateSettings(), null, null, Path.Combine(_root, "spill")));
+            pipeline.Start(Path.Combine(_root, "neither.wav"), CreateSettings(), null));
 
         // Failing is correct here; failing without saying what to do is not.
         Assert.Contains("プライバシー", error.Message);
@@ -369,12 +369,12 @@ public sealed class PipelineTests : IDisposable
     {
         var factory = new FakeCaptureFactory(failMicrophone: true, failSystem: true);
         using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { TranscriptionEnabled = false },
+            Options(),
             factory,
             new TranscriptStore());
 
         Assert.Throws<InvalidOperationException>(() =>
-            pipeline.Start(Path.Combine(_root, "none.wav"), CreateSettings(), null, null, Path.Combine(_root, "spill")));
+            pipeline.Start(Path.Combine(_root, "none.wav"), CreateSettings(), null));
     }
 
     [Fact]
@@ -387,14 +387,14 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Silence(1.0, 48000));
 
         using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { TranscriptionEnabled = false },
+            Options(),
             factory,
             new TranscriptStore());
 
         var path = Path.Combine(_root, "timeline.wav");
-        pipeline.Start(path, CreateSettings(), null, null, Path.Combine(_root, "spill"));
+        pipeline.Start(path, CreateSettings(), null);
         Thread.Sleep(1500);
-        var result = pipeline.Stop(TimeSpan.FromSeconds(5));
+        var result = pipeline.Stop();
 
         // The recording length must track wall-clock time, not the amount of
         // audio the quiet endpoint happened to deliver.
@@ -402,63 +402,55 @@ public sealed class PipelineTests : IDisposable
     }
 
     [Fact]
-    public void TranscriptionRunsWhileRecordingAndTagsTheSourceStream()
+    public void TheTranscriptStaysEmptyForTheWholeRecording()
     {
+        // Two streams of continuous tone for three seconds: under the old design
+        // this produced a steady flow of segments. It must now produce none,
+        // because nothing is transcribing.
         var factory = new FakeCaptureFactory(
             SignalGenerator.Sine(300, 1.0, 48000, 0.35),
             SignalGenerator.Sine(700, 1.0, 48000, 0.35));
 
         var transcript = new TranscriptStore();
-        using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions
-            {
-                TranscriptionEnabled = true,
-                Profile = new PerformanceProfile { ChunkSeconds = 1.0 },
-            },
-            factory,
-            transcript);
+        using var pipeline = new RecordingPipeline(Options(), factory, transcript);
 
-        pipeline.Start(
-            Path.Combine(_root, "stt.wav"),
-            CreateSettings(),
-            new FakeSpeechRecognizer(),
-            null,
-            Path.Combine(_root, "spill"));
+        pipeline.Start(Path.Combine(_root, "no-live-stt.wav"), CreateSettings(), null, Path.Combine(_root, "no-live-stt"));
 
-        Thread.Sleep(3000);
-        pipeline.Stop(TimeSpan.FromSeconds(20));
+        for (var i = 0; i < 6; i++)
+        {
+            Thread.Sleep(500);
+            Assert.Empty(transcript.Snapshot());
+        }
 
-        var segments = transcript.Snapshot();
-        Assert.NotEmpty(segments);
-
-        // Both legs carry a continuous tone, so both must produce segments and
-        // each segment must be attributed to the stream it physically came from.
-        Assert.Contains(segments, s => s.Source == AudioSourceKind.Microphone);
-        Assert.Contains(segments, s => s.Source == AudioSourceKind.SystemAudio);
+        pipeline.Stop();
+        Assert.Empty(transcript.Snapshot());
     }
 
     [Fact]
-    public void RecordingSurvivesARecognizerThatKeepsThrowing()
+    public void StoppingDoesNotStartATranscription()
     {
+        // Stop returns a finished recording and nothing else. The audio is
+        // there, ready to be transcribed when the user asks; the transcript is
+        // not, because nobody asked.
         var factory = new FakeCaptureFactory();
-        using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions
-            {
-                TranscriptionEnabled = true,
-                Profile = new PerformanceProfile { ChunkSeconds = 1.0 },
-            },
-            factory,
-            new TranscriptStore());
+        using var manager = new MeetingSessionManager(factory);
 
-        var path = Path.Combine(_root, "resilient.wav");
-        pipeline.Start(path, CreateSettings(), new AlwaysFailingRecognizer(), null, Path.Combine(_root, "spill"));
-        Thread.Sleep(2500);
-        var result = pipeline.Stop(TimeSpan.FromSeconds(10));
+        manager.Start(CreateSettings(), "stop-only");
+        Thread.Sleep(1200);
 
-        Assert.True(result.Duration.TotalSeconds > 1.5, "audio must keep being written when STT fails");
+        var before = DateTime.UtcNow;
+        var summary = manager.Stop();
+        var elapsed = DateTime.UtcNow - before;
 
-        using var reader = new WavFileReader(path);
-        Assert.True(reader.DurationSeconds > 1.5);
+        Assert.Empty(manager.Transcript.Snapshot());
+        Assert.True(summary.CanTranscribe);
+
+        // Stopping is a file operation, not an inference: it finishes promptly
+        // whatever model happens to be installed.
+        Assert.True(elapsed < TimeSpan.FromSeconds(20), $"stopping took {elapsed.TotalSeconds:F1}s");
+
+        // And the transcript files written at stop are the empty ones.
+        Assert.Contains("認識された発言はありません", File.ReadAllText(summary.Folder.TranscriptTextPath));
     }
 
     [Fact]
@@ -469,14 +461,14 @@ public sealed class PipelineTests : IDisposable
             SignalGenerator.Silence(1.0, 48000));
 
         using var pipeline = new RecordingPipeline(
-            new RecordingPipelineOptions { TranscriptionEnabled = false },
+            Options(),
             factory,
             new TranscriptStore());
 
-        pipeline.Start(Path.Combine(_root, "levels.wav"), CreateSettings(), null, null, Path.Combine(_root, "spill"));
+        pipeline.Start(Path.Combine(_root, "levels.wav"), CreateSettings(), null);
         Thread.Sleep(800);
         var status = pipeline.GetStatus();
-        pipeline.Stop(TimeSpan.FromSeconds(5));
+        pipeline.Stop();
 
         Assert.Equal(RecordingState.Recording, status.State);
         Assert.True(status.MicLevel.PeakDb > -20, $"microphone meter reads {status.MicLevel.PeakDb:F1} dBFS");
@@ -492,22 +484,124 @@ public sealed class PipelineTests : IDisposable
         var settings = CreateSettings();
         settings.SttEnabled = false;
 
-        var folder = manager.Start(settings, null, null, "月次定例");
+        var folder = manager.Start(settings, "月次定例");
         Assert.True(File.Exists(folder.JournalPath), "the crash journal must exist while recording");
 
         Thread.Sleep(1200);
-        var summary = manager.Stop(TimeSpan.FromSeconds(10));
+        var summary = manager.Stop();
 
         Assert.True(File.Exists(folder.WavPath));
         Assert.True(File.Exists(folder.TranscriptTextPath));
         Assert.True(File.Exists(folder.TranscriptMarkdownPath));
         Assert.True(File.Exists(folder.MetadataPath));
         Assert.False(File.Exists(folder.JournalPath), "a clean stop must clear the crash marker");
-        Assert.False(Directory.Exists(Path.Combine(folder.Path, ".stt-spill")), "temporary files must be removed");
 
         Assert.Contains("月次定例", folder.Name);
         Assert.InRange(summary.Metadata.DurationSeconds, 0.8, 2.5);
         Assert.Equal(RecordingFormat.Wav, summary.Metadata.Format);
+    }
+
+    [Fact]
+    public void AQuietRecordingIsRaisedByOneConstantGainWhenItStops()
+    {
+        // The mixer deliberately writes 6 dB down so two full-scale streams
+        // cannot clip. Stopping is where that head-room is handed back - once,
+        // to the whole file, now that its real peak is known.
+        // -16.5 dBFS in the mixed file: quiet enough to need a real boost, loud
+        // enough that the boost cap does not bind.
+        var factory = new FakeCaptureFactory(
+            SignalGenerator.Sine(220, 1.0, 48000, 0.3),
+            SignalGenerator.Silence(1.0, 48000));
+
+        using var manager = new MeetingSessionManager(factory);
+        var settings = CreateSettings();
+        settings.SttEnabled = false;
+
+        manager.Start(settings, "quiet");
+        Thread.Sleep(1500);
+        var summary = manager.Stop();
+
+        Assert.NotNull(summary.Metadata.AppliedGainDb);
+        Assert.InRange(summary.Metadata.AppliedGainDb!.Value, 14.0, 16.5);
+
+        using var reader = new WavFileReader(summary.AudioPath);
+        var peak = AudioMath.Peak(reader.ReadAllMono());
+
+        Assert.InRange(AudioMath.LinearToDb(peak), -1.5, -0.5);
+        Assert.True(peak < 1.0, "normalization must never produce a full-scale sample");
+    }
+
+    [Fact]
+    public void AVeryQuietRecordingIsBoostedOnlyAsFarAsTheCapAllows()
+    {
+        // -38 dBFS once mixed. Raising that to -1 dBFS would mean +37 dB, which
+        // is amplifying the room's noise floor rather than anybody's voice.
+        var factory = new FakeCaptureFactory(
+            SignalGenerator.Sine(220, 1.0, 48000, 0.025),
+            SignalGenerator.Silence(1.0, 48000));
+
+        using var manager = new MeetingSessionManager(factory);
+        var settings = CreateSettings();
+        settings.SttEnabled = false;
+
+        manager.Start(settings, "very-quiet");
+        Thread.Sleep(1500);
+        var summary = manager.Stop();
+
+        Assert.NotNull(summary.Metadata.AppliedGainDb);
+        Assert.InRange(summary.Metadata.AppliedGainDb!.Value, 19.9, 20.1);
+
+        using var reader = new WavFileReader(summary.AudioPath);
+        Assert.True(AudioMath.Peak(reader.ReadAllMono()) < 1.0);
+    }
+
+    [Fact]
+    public void ASilentRecordingIsLeftSilentRatherThanAmplified()
+    {
+        var factory = new FakeCaptureFactory(
+            SignalGenerator.Silence(1.0, 48000),
+            SignalGenerator.Silence(1.0, 48000));
+
+        using var manager = new MeetingSessionManager(factory);
+        var settings = CreateSettings();
+        settings.SttEnabled = false;
+
+        manager.Start(settings, "silent");
+        Thread.Sleep(1200);
+        var summary = manager.Stop();
+
+        Assert.Null(summary.Metadata.AppliedGainDb);
+
+        using var reader = new WavFileReader(summary.AudioPath);
+        Assert.Equal(0.0, AudioMath.Peak(reader.ReadAllMono()));
+    }
+
+    [Fact]
+    public void ARecordingThatWasAlreadyClippedAtTheInputIsReportedToTheUser()
+    {
+        // A square wave at full scale is what an over-driven input produces.
+        // Halved by the mixer it no longer reads as clipped in the file, so the
+        // check has to run on what was captured - and it must say so rather than
+        // claim to have fixed it.
+        var square = new float[48000];
+        for (var i = 0; i < square.Length; i++)
+        {
+            square[i] = (i / 100) % 2 == 0 ? 1f : -1f;
+        }
+
+        var factory = new FakeCaptureFactory(square, square);
+
+        using var manager = new MeetingSessionManager(factory);
+        var settings = CreateSettings();
+        settings.SttEnabled = false;
+
+        manager.Start(settings, "clipped");
+        Thread.Sleep(1500);
+        var summary = manager.Stop();
+
+        Assert.True(summary.Metadata.SourceClipped);
+        Assert.Contains(summary.Warnings, w => w.Contains("既に歪んでいます"));
+        Assert.Contains(summary.Warnings, w => w.Contains("復元できません"));
     }
 
     [Fact]
@@ -519,7 +613,7 @@ public sealed class PipelineTests : IDisposable
         var settings = CreateSettings();
         settings.SttEnabled = false;
 
-        var folder = manager.Start(settings, null, null, "中断テスト");
+        var folder = manager.Start(settings, "中断テスト");
         Thread.Sleep(1000);
 
         // Drop the manager without calling Stop: the process "crashed".
@@ -539,9 +633,9 @@ public sealed class PipelineTests : IDisposable
         settings.SttEnabled = false;
         settings.Format = RecordingFormat.Mp3;
 
-        manager.Start(settings, null, null, "MP3");
+        manager.Start(settings, "MP3");
         Thread.Sleep(900);
-        var summary = manager.Stop(TimeSpan.FromSeconds(10));
+        var summary = manager.Stop();
 
         Assert.Equal(RecordingFormat.Wav, summary.Metadata.Format);
         Assert.Contains(summary.Warnings, w => w.Contains("MP3"));
@@ -557,9 +651,9 @@ public sealed class PipelineTests : IDisposable
         var settings = CreateSettings();
         settings.SttEnabled = false;
 
-        var folder = manager.Start(settings, null, null, null);
+        var folder = manager.Start(settings);
         Thread.Sleep(700);
-        manager.Stop(TimeSpan.FromSeconds(10));
+        manager.Stop();
 
         manager.Transcript.InsertManual(1000, AudioSourceKind.Microphone, "手入力した発言");
         manager.SaveTranscript();
@@ -581,15 +675,15 @@ public sealed class PipelineTests : IDisposable
         for (var round = 0; round < 2; round++)
         {
             using var pipeline = new RecordingPipeline(
-                new RecordingPipelineOptions { TranscriptionEnabled = false },
+                Options(),
                 factory,
                 new TranscriptStore(),
                 sleepPreventer);
 
-            pipeline.Start(Path.Combine(_root, $"sleep-{round}.wav"), settings, null, null, Path.Combine(_root, "spill"));
+            pipeline.Start(Path.Combine(_root, $"sleep-{round}.wav"), settings, null);
             Assert.True(sleepPreventer.IsActive, $"round {round}: sleep suppression was not requested");
 
-            pipeline.Stop(TimeSpan.FromSeconds(5));
+            pipeline.Stop();
             Assert.False(sleepPreventer.IsActive, $"round {round}: sleep suppression was not released");
         }
 
@@ -598,14 +692,27 @@ public sealed class PipelineTests : IDisposable
         sleepPreventer.Restore();
     }
 
-    private sealed class AlwaysFailingRecognizer : ISpeechRecognizer
+    /// <summary>
+    /// A recognizer that fails the test if anything ever calls it.
+    /// </summary>
+    /// <remarks>
+    /// It exists so "no inference during a recording" is enforced rather than
+    /// observed: a recording path that reached a recognizer would trip this
+    /// immediately.
+    /// </remarks>
+    private sealed class ForbiddenRecognizer : ISpeechRecognizer
     {
-        public string ModelId => "failing";
+        public int Calls { get; private set; }
+
+        public string ModelId => "forbidden";
 
         public bool IsReady => true;
 
         public IReadOnlyList<RecognizedSpan> Transcribe(ReadOnlySpan<float> samples, string language, CancellationToken cancellationToken)
-            => throw new InvalidOperationException("simulated STT failure");
+        {
+            Calls++;
+            throw new InvalidOperationException("Recording must never invoke a speech recognizer.");
+        }
 
         public void Dispose()
         {

@@ -1,3 +1,4 @@
+using MeetingRecorder.Core.Audio;
 using MeetingRecorder.Core.Dsp;
 using MeetingRecorder.Core.Models;
 using MeetingRecorder.Core.Tests.TestSupport;
@@ -44,191 +45,322 @@ public class AudioMathTests
     }
 }
 
-public class LimiterTests
+/// <summary>
+/// The stages that are gone, asserted by name.
+/// </summary>
+/// <remarks>
+/// Every one of these changed gain as a function of time, and a speech
+/// recognizer reads exactly that. Deleting them is the point of this change, so
+/// the check is not "are they disabled" - a disabled stage can be re-enabled by
+/// a stray setting - but "do they exist at all". Reflection over the shipped
+/// assembly is the only form of this assertion that a future edit cannot quietly
+/// satisfy.
+/// </remarks>
+public class RemovedProcessingStagesTests
 {
-    private static AudioProcessingSettings Settings() => new();
-
-    [Fact]
-    public void NeverExceedsTheCeilingEvenForGrosslyHotInput()
+    [Theory]
+    [InlineData("NoiseGate")]
+    [InlineData("Compressor")]
+    [InlineData("Limiter")]
+    [InlineData("LoudnessNormalizer")]
+    [InlineData("Agc")]
+    [InlineData("SoftGate")]
+    public void TheTimeVaryingStagesAreNotInTheProduct(string typeName)
     {
-        var settings = Settings();
-        var limiter = new Limiter(settings, 48000);
-        var ceiling = AudioMath.DbToLinear(settings.LimiterCeilingDb);
+        var assembly = typeof(AudioProcessingChain).Assembly;
+        var found = assembly.GetTypes().Where(t => t.Name.Contains(typeName, StringComparison.OrdinalIgnoreCase)).ToList();
 
-        // 4x full scale: nothing a real chain produces, which is exactly why the
-        // guarantee has to hold for it.
-        var hot = SignalGenerator.Sine(440, 2.0, 48000, 4.0);
-        limiter.Process(hot);
-
-        Assert.True(AudioMath.Peak(hot) <= ceiling + 1e-6, $"peak {AudioMath.Peak(hot)} exceeded ceiling {ceiling}");
+        Assert.True(
+            found.Count == 0,
+            $"'{typeName}' still exists in {assembly.GetName().Name}: {string.Join(", ", found.Select(t => t.FullName))}");
     }
 
     [Fact]
-    public void LeavesQuietSignalEssentiallyUntouched()
+    public void NoAudioSettingConfiguresAGateACompressorOrALimiter()
     {
-        var limiter = new Limiter(Settings(), 48000);
-        var quiet = SignalGenerator.Sine(440, 1.0, 48000, 0.1);
-        var original = (float[])quiet.Clone();
-        limiter.Process(quiet);
+        // A leftover property is how a deleted stage comes back: someone reads
+        // it, wires it up, and the recordings quietly change.
+        var forbidden = new[] { "Gate", "Compressor", "Limiter", "Agc", "TargetRms", "Adaptation" };
 
-        // Compare after the look-ahead delay: the limiter delays the signal.
-        var latency = limiter.LatencySamples;
-        var errors = 0;
-        for (var i = latency; i < quiet.Length; i++)
+        var offending = typeof(AudioProcessingSettings)
+            .GetProperties()
+            .Where(p => forbidden.Any(f => p.Name.Contains(f, StringComparison.OrdinalIgnoreCase)))
+            .Select(p => p.Name)
+            .ToList();
+
+        Assert.True(offending.Count == 0, $"AudioProcessingSettings still exposes: {string.Join(", ", offending)}");
+    }
+}
+
+public class PeakNormalizerTests : IDisposable
+{
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "mr-gain-" + Guid.NewGuid().ToString("N"));
+
+    public PeakNormalizerTests() => Directory.CreateDirectory(_root);
+
+    public void Dispose()
+    {
+        try
         {
-            if (Math.Abs(quiet[i] - original[i - latency]) > 0.01)
+            Directory.Delete(_root, true);
+        }
+        catch (IOException)
+        {
+        }
+    }
+
+    private string WriteWav(string name, float[] samples, int sampleRate = 48000)
+    {
+        var path = Path.Combine(_root, name);
+        using (var writer = new WavFileWriter(path, sampleRate))
+        {
+            writer.Write(samples);
+            writer.Flush();
+        }
+
+        return path;
+    }
+
+    private static float[] ReadWav(string path)
+    {
+        using var reader = new WavFileReader(path);
+        return reader.ReadAllMono();
+    }
+
+    /// <summary>
+    /// Speech-shaped material: a quiet onset, a loud passage, digital silence
+    /// and a very small transient. Between them they cover everything a gate, an
+    /// AGC or a compressor would visibly damage.
+    /// </summary>
+    private static float[] DynamicSpeechLikeSignal() => SignalGenerator.Concat(
+        SignalGenerator.Sine(180, 0.30, 48000, 0.02),   // a quiet start
+        SignalGenerator.Sine(240, 0.50, 48000, 0.45),   // a loud passage
+        SignalGenerator.Silence(0.40, 48000),           // a pause
+        SignalGenerator.Sine(3000, 0.02, 48000, 0.004), // a faint consonant burst
+        SignalGenerator.Silence(0.20, 48000),
+        SignalGenerator.Sine(200, 0.30, 48000, 0.12));
+
+    [Fact]
+    public void EveryNonZeroSampleIsMultipliedByTheSameConstant()
+    {
+        // This is the whole requirement in one assertion: output[n] / input[n]
+        // must be one number, for every n. A gate, an AGC, a compressor or a
+        // limiter all fail it by construction.
+        var input = DynamicSpeechLikeSignal();
+        var path = WriteWav("constant-gain.wav", input);
+        var settings = new AudioProcessingSettings();
+
+        var result = PeakNormalizer.Normalize(path, settings);
+        Assert.True(result.Applied, "a signal peaking at -7 dBFS should be raised");
+
+        var output = ReadWav(path);
+        Assert.Equal(input.Length, output.Length);
+
+        double? reference = null;
+        var compared = 0;
+
+        for (var i = 0; i < input.Length; i++)
+        {
+            // 16-bit quantisation is +/- 1/65536 of full scale, so only samples
+            // comfortably above it can carry a meaningful ratio.
+            if (Math.Abs(input[i]) < 0.01)
             {
-                errors++;
+                continue;
             }
+
+            var ratio = output[i] / (double)input[i];
+            reference ??= ratio;
+            compared++;
+
+            // 0.5% covers re-quantisation at this amplitude and nothing else.
+            Assert.InRange(ratio, reference.Value * 0.995, reference.Value * 1.005);
         }
 
-        Assert.True(errors < quiet.Length / 100, $"{errors} samples differed by more than 0.01");
+        Assert.True(compared > 20000, $"only {compared} samples were large enough to compare");
+        Assert.InRange(reference!.Value, result.Gain * 0.99, result.Gain * 1.01);
     }
 
     [Fact]
-    public void ClipsHardEvenWhenDisabled()
+    public void TheRelativeAmplitudeOfLoudAndQuietPassagesIsUnchanged()
     {
-        var settings = Settings();
-        settings.LimiterEnabled = false;
-        var limiter = new Limiter(settings, 48000);
-        var hot = SignalGenerator.Sine(440, 0.2, 48000, 3.0);
-        limiter.Process(hot);
+        var input = DynamicSpeechLikeSignal();
+        var path = WriteWav("relative.wav", input);
 
-        Assert.True(AudioMath.Peak(hot) <= AudioMath.DbToLinear(settings.LimiterCeilingDb) + 1e-6);
-    }
-}
+        var quietBefore = AudioMath.Rms(input.AsSpan(0, 14000));
+        var loudBefore = AudioMath.Rms(input.AsSpan(20000, 20000));
 
-public class LoudnessNormalizerTests
-{
-    [Fact]
-    public void RaisesQuietSpeechTowardsTheTarget()
-    {
-        var settings = new AudioProcessingSettings();
-        var normalizer = new LoudnessNormalizer(settings, 48000);
+        PeakNormalizer.Normalize(path, new AudioProcessingSettings());
+        var output = ReadWav(path);
 
-        // -40 dBFS input; the AGC may add at most +18 dB, so it should end up
-        // around -22 dBFS, not at the -20 dBFS target.
-        var quiet = SignalGenerator.Sine(300, 30.0, 48000, AudioMath.DbToLinear(-40) * Math.Sqrt(2));
-        ProcessInBlocks(normalizer, quiet, 4800);
+        var quietAfter = AudioMath.Rms(output.AsSpan(0, 14000));
+        var loudAfter = AudioMath.Rms(output.AsSpan(20000, 20000));
 
-        var tail = quiet.AsSpan(quiet.Length - 48000);
-        var level = AudioMath.RmsDb(tail);
-        Assert.InRange(level, -24.0, -19.0);
-        Assert.InRange(normalizer.CurrentGainDb, settings.MinGainDb, settings.MaxGainDb);
+        // The ratio between a quiet passage and a loud one is the thing a
+        // compressor exists to change. It must not have changed.
+        var before = loudBefore / quietBefore;
+        var after = loudAfter / quietAfter;
+        Assert.InRange(after, before * 0.99, before * 1.01);
     }
 
     [Fact]
-    public void NeverExceedsTheMaximumGain()
+    public void SilenceStaysSilent()
     {
-        var settings = new AudioProcessingSettings();
-        var normalizer = new LoudnessNormalizer(settings, 48000);
-        var verySoft = SignalGenerator.Sine(300, 60.0, 48000, AudioMath.DbToLinear(-70));
-        ProcessInBlocks(normalizer, verySoft, 4800);
+        var input = DynamicSpeechLikeSignal();
+        var path = WriteWav("silence.wav", input);
 
-        Assert.True(normalizer.CurrentGainDb <= settings.MaxGainDb + 1e-6);
-    }
+        PeakNormalizer.Normalize(path, new AudioProcessingSettings());
+        var output = ReadWav(path);
 
-    [Fact]
-    public void DoesNotWindGainUpOnSilence()
-    {
-        var settings = new AudioProcessingSettings();
-        var normalizer = new LoudnessNormalizer(settings, 48000);
-        var silence = SignalGenerator.Silence(30.0, 48000);
-        ProcessInBlocks(normalizer, silence, 4800);
-
-        Assert.Equal(0.0, normalizer.CurrentGainDb, 6);
-    }
-
-    [Fact]
-    public void AdaptsSlowlyEnoughToAvoidPumping()
-    {
-        var settings = new AudioProcessingSettings();
-        var normalizer = new LoudnessNormalizer(settings, 48000);
-        var quiet = SignalGenerator.Sine(300, 1.0, 48000, AudioMath.DbToLinear(-40));
-        ProcessInBlocks(normalizer, quiet, 4800);
-
-        // One second at 1.5 dB/s must not move the gain more than ~1.5 dB.
-        Assert.InRange(normalizer.CurrentGainDb, 0.0, 1.8);
-    }
-
-    private static void ProcessInBlocks(LoudnessNormalizer normalizer, float[] samples, int blockSize)
-    {
-        for (var offset = 0; offset < samples.Length; offset += blockSize)
+        // Samples 38400..57600 are the digital silence in the middle. Multiplying
+        // zero by anything is still zero - unlike a noise floor lifted by an AGC.
+        for (var i = 38_400; i < 57_600; i++)
         {
-            var length = Math.Min(blockSize, samples.Length - offset);
-            normalizer.Process(samples.AsSpan(offset, length));
+            Assert.Equal(0f, output[i]);
         }
     }
-}
 
-public class NoiseGateTests
-{
     [Fact]
-    public void AttenuatesBackgroundButNeverMutesIt()
+    public void AFaintTransientSurvivesInProportion()
     {
-        var settings = new AudioProcessingSettings();
-        var gate = new NoiseGate(settings, 48000);
+        // The 4 ms, -48 dBFS burst is exactly what a gate removes: too short to
+        // open it, too quiet to matter to it. It has to come through scaled by
+        // the same factor as the rest.
+        var input = DynamicSpeechLikeSignal();
+        var path = WriteWav("transient.wav", input);
 
-        var background = SignalGenerator.Noise(3.0, 48000, AudioMath.DbToLinear(-70));
-        var before = AudioMath.RmsDb(background);
-        gate.Process(background);
-        var after = AudioMath.RmsDb(background);
+        var burstStart = (int)(48000 * 1.20);
+        var burstLength = (int)(48000 * 0.02);
+        var before = AudioMath.Peak(input.AsSpan(burstStart, burstLength));
+        Assert.True(before > 0, "the fixture must contain the burst");
 
-        Assert.True(after < before, "the gate should reduce background");
-        // Attenuation is bounded, so the background is still present.
-        Assert.True(after > before - settings.GateMaxAttenuationDb - 1.0);
-        Assert.True(AudioMath.Peak(background) > 0, "the gate must never produce digital silence");
+        var result = PeakNormalizer.Normalize(path, new AudioProcessingSettings());
+        var output = ReadWav(path);
+        var after = AudioMath.Peak(output.AsSpan(burstStart, burstLength));
+
+        Assert.InRange(after, before * result.Gain * 0.9, before * result.Gain * 1.1);
     }
 
     [Fact]
-    public void KeepsShortUtterancesIntactIncludingTheirTail()
+    public void NormalizationNeverProducesASampleAtFullScale()
     {
         var settings = new AudioProcessingSettings();
-        var gate = new NoiseGate(settings, 48000);
+        var ceiling = AudioMath.DbToLinear(settings.NormalizationTargetPeakDbFs);
 
-        // 200 ms of speech - about the length of a Japanese back-channel "はい".
-        var signal = SignalGenerator.Concat(
-            SignalGenerator.Noise(1.0, 48000, AudioMath.DbToLinear(-70)),
-            SignalGenerator.Sine(300, 0.2, 48000, 0.3),
-            SignalGenerator.Noise(1.0, 48000, AudioMath.DbToLinear(-70)));
+        foreach (var amplitude in new[] { 0.001, 0.05, 0.5, 0.95, 0.999 })
+        {
+            var path = WriteWav($"ceiling-{amplitude}.wav", SignalGenerator.Sine(300, 0.5, 48000, amplitude));
+            PeakNormalizer.Normalize(path, settings);
 
-        var utteranceBefore = AudioMath.RmsDb(signal.AsSpan(48000, 9600));
-        gate.Process(signal);
-        var utteranceAfter = AudioMath.RmsDb(signal.AsSpan(48000, 9600));
-
-        Assert.True(utteranceAfter > utteranceBefore - 1.5, $"short utterance lost {utteranceBefore - utteranceAfter:F1} dB");
-    }
-}
-
-public class CompressorTests
-{
-    [Fact]
-    public void ReducesLevelAboveTheThreshold()
-    {
-        var settings = new AudioProcessingSettings();
-        var compressor = new Compressor(settings, 48000);
-
-        var loud = SignalGenerator.Sine(300, 2.0, 48000, AudioMath.DbToLinear(-6));
-        var before = AudioMath.RmsDb(loud);
-        compressor.Process(loud);
-        var after = AudioMath.RmsDb(loud.AsSpan(48000));
-
-        Assert.True(after < before, "signal above the threshold should be reduced");
+            var peak = AudioMath.Peak(ReadWav(path));
+            Assert.True(peak < 1.0, $"amplitude {amplitude} produced a full-scale sample ({peak})");
+            Assert.True(
+                peak <= ceiling + 0.001,
+                $"amplitude {amplitude} exceeded the {settings.NormalizationTargetPeakDbFs} dBFS target ({AudioMath.LinearToDb(peak):F2} dBFS)");
+        }
     }
 
     [Fact]
-    public void LeavesQuietSignalAlone()
+    public void AHotFileIsScaledDownRatherThanHavingItsPeaksFlattened()
+    {
+        // The forbidden alternative, written out: `if (s > t) s = t;`. It would
+        // pass a peak check and fail this one, because every sample has to be
+        // the input times one number - including the ones that were too loud.
+        var input = SignalGenerator.Sine(300, 1.0, 48000, 0.99);
+        var path = WriteWav("hot.wav", input);
+
+        var result = PeakNormalizer.Normalize(path, new AudioProcessingSettings());
+        Assert.True(result.Applied);
+        Assert.True(result.Gain < 1.0, "a file peaking at -0.1 dBFS has to come down, not up");
+
+        var output = ReadWav(path);
+
+        // The fixture is quantised to 16 bits when it is written and again when
+        // it is rewritten, and the writer scales by 32767 while the reader
+        // divides by 32768. Three 16-bit steps covers all of that and nothing
+        // that would count as a change of shape.
+        const double tolerance = 3.0 / 32768.0;
+        for (var i = 0; i < input.Length; i++)
+        {
+            var expected = input[i] * result.Gain;
+            Assert.InRange(output[i] - expected, -tolerance, tolerance);
+        }
+
+        // The crest factor of a sine is fixed. A clipper raises it; a gain does not.
+        var crestBefore = AudioMath.Peak(input) / AudioMath.Rms(input);
+        var crestAfter = AudioMath.Peak(output) / AudioMath.Rms(output);
+        Assert.InRange(crestAfter, crestBefore * 0.99, crestBefore * 1.01);
+    }
+
+    [Fact]
+    public void BoostIsCappedSoANearlySilentRecordingIsNotAmplifiedToFullScale()
     {
         var settings = new AudioProcessingSettings();
-        var compressor = new Compressor(settings, 48000);
+        var maximum = AudioMath.DbToLinear(settings.MaxNormalizationGainDb);
 
-        var quiet = SignalGenerator.Sine(300, 2.0, 48000, AudioMath.DbToLinear(-40));
-        var before = AudioMath.RmsDb(quiet);
-        compressor.Process(quiet);
-        var after = AudioMath.RmsDb(quiet.AsSpan(48000));
+        // -80 dBFS: essentially the noise floor of the capture, not speech.
+        Assert.Equal(maximum, PeakNormalizer.ComputeGain(AudioMath.DbToLinear(-80), settings), 6);
+    }
 
-        // Only the fixed auto make-up gain applies below the threshold.
-        Assert.InRange(after - before, -0.5, 2.5);
+    [Fact]
+    public void SilenceIsLeftExactlyAsItIs()
+    {
+        var path = WriteWav("all-silence.wav", SignalGenerator.Silence(0.5, 48000));
+        var result = PeakNormalizer.Normalize(path, new AudioProcessingSettings());
+
+        Assert.False(result.Applied);
+        Assert.Equal(1.0, result.Gain);
+        Assert.Equal(0.0, AudioMath.Peak(ReadWav(path)));
+    }
+
+    [Fact]
+    public void AudioThatArrivedClippedIsReportedAndNotRepaired()
+    {
+        // A square wave is what an over-driven input produces: a long run of
+        // samples pinned to full scale.
+        var input = new float[48000];
+        for (var i = 0; i < input.Length; i++)
+        {
+            input[i] = (i / 100) % 2 == 0 ? 1f : -1f;
+        }
+
+        var path = WriteWav("clipped.wav", input);
+        var settings = new AudioProcessingSettings();
+        var result = PeakNormalizer.Normalize(path, settings);
+
+        Assert.True(result.Scan.IsClipped, "a fully pinned waveform must be reported as clipped");
+        Assert.True(result.Scan.ClippedFraction > 0.9);
+
+        // The flattened peaks are still flat afterwards: nothing here claims to
+        // have restored them.
+        var output = ReadWav(path);
+        var peak = AudioMath.Peak(output);
+        Assert.True(output.Count(s => Math.Abs(s) >= peak - 1e-4) > 40000);
+    }
+
+    [Fact]
+    public void CleanAudioIsNotReportedAsClipped()
+    {
+        var path = WriteWav("clean.wav", SignalGenerator.Sine(300, 1.0, 48000, 0.9));
+        var scan = PeakNormalizer.Scan(path, new AudioProcessingSettings());
+
+        Assert.False(scan.IsClipped);
+    }
+
+    [Fact]
+    public void AFailedRewriteLeavesTheOriginalRecordingIntact()
+    {
+        var input = SignalGenerator.Sine(300, 0.5, 48000, 0.1);
+        var path = WriteWav("protected.wav", input);
+        var before = File.ReadAllBytes(path);
+
+        var result = PeakNormalizer.Normalize(
+            path,
+            new AudioProcessingSettings(),
+            writerFactory: (_, _) => throw new IOException("disk full (test)"));
+
+        Assert.False(result.Applied);
+        Assert.Equal(before, File.ReadAllBytes(path));
+        Assert.Contains("録音した音量のまま", result.Reason);
     }
 }
 
@@ -307,19 +439,51 @@ public class ResamplerTests
 public class StreamMixerTests
 {
     [Fact]
-    public void SumsBothLegsWithHeadroomAndNeverClips()
+    public void TwoFullScaleStreamsSumToExactlyFullScaleAndNeverBeyond()
     {
+        // The mixer's only job beyond the sum: make clipping arithmetically
+        // impossible without a limiter and without a clamp. At -6.02 dB per leg,
+        // 1.0 + 1.0 lands on 1.0 - the worst case there is.
         var settings = new AudioProcessingSettings();
         var mixer = new StreamMixer(settings, 48000);
 
-        var mic = SignalGenerator.Sine(300, 1.0, 48000, 0.9);
-        var system = SignalGenerator.Sine(900, 1.0, 48000, 0.9);
+        var mic = SignalGenerator.Sine(300, 1.0, 48000, 1.0);
+        var system = SignalGenerator.Sine(300, 1.0, 48000, 1.0);
         var mix = new float[mic.Length];
 
         mixer.Mix(mic, system, mix);
 
-        Assert.True(AudioMath.Peak(mix) <= AudioMath.DbToLinear(settings.LimiterCeilingDb) + 1e-6);
-        // Both sources must still be audible in the result.
+        Assert.True(AudioMath.Peak(mix) <= 1.0 + 1e-6, $"peak {AudioMath.Peak(mix)} exceeded full scale");
+        Assert.InRange(AudioMath.Peak(mix), 0.99, 1.0 + 1e-6);
+    }
+
+    [Fact]
+    public void TheMixIsALinearSumWithOneConstantGain()
+    {
+        var mixer = new StreamMixer(new AudioProcessingSettings(), 48000);
+
+        var mic = SignalGenerator.Sine(300, 0.2, 48000, 0.4);
+        var system = SignalGenerator.Sine(900, 0.2, 48000, 0.1);
+        var mix = new float[mic.Length];
+
+        mixer.Mix(mic, system, mix);
+
+        for (var i = 0; i < mix.Length; i++)
+        {
+            Assert.Equal((mic[i] + system[i]) * mixer.Gain, mix[i], 5);
+        }
+    }
+
+    [Fact]
+    public void BothSourcesStayAudibleInTheResult()
+    {
+        var mixer = new StreamMixer(new AudioProcessingSettings(), 48000);
+
+        var mic = SignalGenerator.Sine(300, 1.0, 48000, 0.5);
+        var system = SignalGenerator.Sine(900, 1.0, 48000, 0.5);
+        var mix = new float[mic.Length];
+
+        mixer.Mix(mic, system, mix);
         Assert.True(AudioMath.Rms(mix) > 0.1);
     }
 
@@ -465,22 +629,69 @@ public class DriftCompensatorTests
 public class ProcessingChainTests
 {
     [Fact]
-    public void ChainKeepsOutputWithinTheCeiling()
+    public void TheChainAppliesTheSameGainToALoudPassageAndAQuietOne()
     {
+        // What the recording chain does, in full. A gate, an AGC or a compressor
+        // would each show up here as a different gain on the -34 dBFS passages
+        // than on the -4 dBFS one.
         var settings = new AudioProcessingSettings();
         var chain = new AudioProcessingChain(settings, 48000);
-        var signal = SignalGenerator.Sine(300, 5.0, 48000, 0.95);
+
+        var signal = SignalGenerator.Concat(
+            SignalGenerator.Sine(200, 0.5, 48000, 0.02),
+            SignalGenerator.Sine(200, 0.5, 48000, 0.6),
+            SignalGenerator.Silence(0.3, 48000),
+            SignalGenerator.Sine(200, 0.5, 48000, 0.02));
+
+        var original = (float[])signal.Clone();
 
         for (var offset = 0; offset < signal.Length; offset += 960)
         {
             chain.Process(signal.AsSpan(offset, Math.Min(960, signal.Length - offset)));
         }
 
-        Assert.True(AudioMath.Peak(signal) <= AudioMath.DbToLinear(settings.LimiterCeilingDb) + 1e-6);
+        // Sample-by-sample comparison would measure the high-pass's phase shift
+        // rather than its gain, so each passage is compared by level. Windows
+        // start a little inside each passage to skip the filter's transient.
+        var passages = new[] { (4800, 14400), (28800, 14400), (67200, 14400) };
+        var gains = passages
+            .Select(p => AudioMath.Rms(signal.AsSpan(p.Item1, p.Item2)) / AudioMath.Rms(original.AsSpan(p.Item1, p.Item2)))
+            .ToArray();
+
+        foreach (var gain in gains)
+        {
+            // A 20 Hz first-order high-pass costs a 200 Hz tone 0.5%.
+            Assert.InRange(gain, 0.98, 1.02);
+        }
+
+        Assert.InRange(gains[1] / gains[0], 0.99, 1.01);
+        Assert.InRange(gains[2] / gains[0], 0.99, 1.01);
     }
 
     [Fact]
-    public void ChainRemovesDcOffset()
+    public void TheChainDoesNotLiftAQuietPassageTowardsALoudOne()
+    {
+        var chain = new AudioProcessingChain(new AudioProcessingSettings(), 48000);
+
+        // 30 seconds is far longer than any AGC time constant: if one were still
+        // in the chain, the quiet tail would have been pulled up by now.
+        var signal = SignalGenerator.Concat(
+            SignalGenerator.Sine(200, 15.0, 48000, 0.5),
+            SignalGenerator.Sine(200, 15.0, 48000, 0.01));
+
+        for (var offset = 0; offset < signal.Length; offset += 4800)
+        {
+            chain.Process(signal.AsSpan(offset, Math.Min(4800, signal.Length - offset)));
+        }
+
+        var loud = AudioMath.Rms(signal.AsSpan(48000, 48000));
+        var quiet = AudioMath.Rms(signal.AsSpan(signal.Length - 48000));
+
+        Assert.InRange(loud / quiet, 45.0, 55.0);
+    }
+
+    [Fact]
+    public void TheChainRemovesDcOffset()
     {
         var settings = new AudioProcessingSettings();
         var chain = new AudioProcessingChain(settings, 48000);
@@ -505,5 +716,13 @@ public class ProcessingChainTests
 
         mean /= tail.Length;
         Assert.InRange(mean, -0.02, 0.02);
+    }
+
+    [Fact]
+    public void TheChainIntroducesNoLatency()
+    {
+        // Anything that delays the signal would have to be a look-ahead stage,
+        // and the only stage that ever needed one was the limiter.
+        Assert.Equal(0, new AudioProcessingChain(new AudioProcessingSettings(), 48000).LatencySamples);
     }
 }

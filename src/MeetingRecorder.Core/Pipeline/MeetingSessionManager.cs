@@ -2,7 +2,6 @@ using MeetingRecorder.Core.Audio;
 using MeetingRecorder.Core.Diagnostics;
 using MeetingRecorder.Core.Models;
 using MeetingRecorder.Core.Persistence;
-using MeetingRecorder.Core.Stt;
 
 namespace MeetingRecorder.Core.Pipeline;
 
@@ -10,11 +9,18 @@ namespace MeetingRecorder.Core.Pipeline;
 /// Owns one meeting from "start recording" to "the folder on disk is complete".
 /// </summary>
 /// <remarks>
+/// <para>
 /// Splitting this from <see cref="RecordingPipeline"/> keeps the real-time path
 /// free of file-format and bookkeeping concerns: the pipeline only ever writes
-/// PCM into an open WAV, and everything that can afford to be slow - transcoding
-/// to MP3, rendering transcripts, updating metadata - happens here, after the
-/// audio is already safe on disk.
+/// PCM into open WAVs, and everything that can afford to be slow - the single
+/// constant gain applied to the finished file, transcoding to MP3, updating
+/// metadata - happens here, after the audio is already safe on disk.
+/// </para>
+/// <para>
+/// Stopping produces a complete meeting folder and nothing more. It does not
+/// start a transcription; that is a separate thing the user asks for, and
+/// <see cref="MeetingSummary.CanTranscribe"/> says whether it is available.
+/// </para>
 /// </remarks>
 public sealed class MeetingSessionManager : IDisposable
 {
@@ -36,16 +42,18 @@ public sealed class MeetingSessionManager : IDisposable
         IAudioTranscoder? transcoder = null,
         ISleepPreventer? sleepPreventer = null,
         ILogger? logger = null,
-        Func<string, int, IAudioFileWriter>? writerFactory = null)
+        Func<string, int, IAudioFileWriter>? writerFactory = null,
+        TranscriptStore? transcript = null)
     {
         _captureFactory = captureFactory;
         _transcoder = transcoder;
         _sleepPreventer = sleepPreventer ?? new NullSleepPreventer();
         _logger = logger ?? NullLogger.Instance;
         _writerFactory = writerFactory;
+        Transcript = transcript ?? new TranscriptStore();
     }
 
-    public TranscriptStore Transcript { get; } = new();
+    public TranscriptStore Transcript { get; }
 
     public MeetingFolder? Folder => _folder;
 
@@ -95,12 +103,16 @@ public sealed class MeetingSessionManager : IDisposable
     private bool _pendingMicrophoneMuted;
     private bool _pendingSystemAudioMuted;
 
-    /// <summary>Creates the meeting folder and starts capture.</summary>
-    public MeetingFolder Start(
-        AppSettings settings,
-        ISpeechRecognizer? recognizer,
-        ISpeakerDiarizer? diarizer = null,
-        string? title = null)
+    /// <summary>
+    /// Creates the meeting folder and starts capture.
+    /// </summary>
+    /// <remarks>
+    /// Nothing about speech recognition happens here. No model is resolved, no
+    /// recognizer is constructed and no worker is started, so the time between
+    /// the user pressing the button and the first sample reaching disk does not
+    /// depend on which model they have installed, or whether they have one.
+    /// </remarks>
+    public MeetingFolder Start(AppSettings settings, string? title = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (IsRecording)
@@ -120,7 +132,6 @@ public sealed class MeetingSessionManager : IDisposable
         Directory.CreateDirectory(settings.SaveRoot!);
         _folder = MeetingFolder.Create(settings.SaveRoot!, startedAt, title);
 
-        var profile = settings.Profile ?? new PerformanceProfile();
         _metadata = new MeetingMetadata
         {
             FolderName = _folder.Name,
@@ -132,8 +143,6 @@ public sealed class MeetingSessionManager : IDisposable
             Channels = 1,
             MicrophoneDeviceName = settings.MicrophoneDeviceName,
             RenderDeviceName = settings.RenderDeviceName,
-            SttModelId = recognizer?.ModelId,
-            DiarizationUsed = diarizer is { IsEnabled: true },
         };
 
         _folder.WriteMetadata(_metadata);
@@ -147,8 +156,6 @@ public sealed class MeetingSessionManager : IDisposable
         var options = new RecordingPipelineOptions
         {
             Processing = settings.Processing,
-            Profile = profile,
-            TranscriptionEnabled = settings.SttEnabled,
             AutoSaveInterval = TimeSpan.FromSeconds(Math.Max(5, settings.AutoSaveIntervalSeconds)),
         };
 
@@ -156,16 +163,14 @@ public sealed class MeetingSessionManager : IDisposable
         _pipeline.Fault += (_, fault) => Fault?.Invoke(this, fault);
         _pipeline.StatusChanged += status => StatusChanged?.Invoke(status);
 
-        var spill = Path.Combine(_folder.Path, ".stt-spill");
-
-        // The second pass reads per-stream audio, so it has to be captured while
-        // the meeting runs - there is no way to recover it afterwards from a
-        // mixed file. Only kept when the pass is actually going to run.
-        var recognitionAudio = settings.SttEnabled && settings.RefineTranscriptAfterRecording
+        // Per-stream audio has to be captured while the meeting runs; there is
+        // no way to recover it afterwards from a mixed file. Only kept when the
+        // user wants to be able to transcribe this meeting.
+        var recognitionAudio = settings.SttEnabled && settings.KeepRecognitionAudio
             ? _folder.Path
             : null;
 
-        _pipeline.Start(_folder.WavPath, settings, recognizer, _journal, spill, diarizer, recognitionAudio);
+        _pipeline.Start(_folder.WavPath, settings, _journal, recognitionAudio);
 
         // A toggle flipped while idle applies to the recording that just started.
         _pipeline.MicrophoneMuted = _pendingMicrophoneMuted || settings.MicrophoneMuted;
@@ -176,28 +181,28 @@ public sealed class MeetingSessionManager : IDisposable
     }
 
     /// <summary>
-    /// Stops the recording and finishes the folder: transcript files, optional
-    /// MP3 transcode, metadata, and removal of the crash journal.
+    /// Stops the recording and finishes the folder: the one constant gain, an
+    /// optional MP3 transcode, metadata, and removal of the crash journal.
     /// </summary>
-    public MeetingSummary Stop(TimeSpan? transcriptionDrainTimeout = null)
+    public MeetingSummary Stop()
     {
         if (_pipeline is null || _folder is null || _metadata is null || _settings is null)
         {
             throw new InvalidOperationException("録音は開始されていません。");
         }
 
-        var result = _pipeline.Stop(transcriptionDrainTimeout);
+        var result = _pipeline.Stop();
         var warnings = new List<string>(result.Warnings);
 
         _metadata.StoppedAtLocal = DateTimeOffset.Now;
         _metadata.DurationSeconds = result.Duration.TotalSeconds;
-        _metadata.DiarizationUsed = _metadata.DiarizationUsed && Transcript.Snapshot().Any(s => s.SpeakerId.HasValue);
 
         var audioPath = result.AudioFilePath;
+        NormalizeRecording(audioPath, warnings);
 
         if (_settings.Format == RecordingFormat.Mp3)
         {
-            audioPath = TranscodeToMp3(result.AudioFilePath, warnings);
+            audioPath = TranscodeToMp3(audioPath, warnings);
         }
 
         _metadata.AudioFileName = Path.GetFileName(audioPath);
@@ -217,19 +222,59 @@ public sealed class MeetingSessionManager : IDisposable
         Transcript.AttachJournal(null);
 
         // The journal is the crash marker; deleting it is what declares this
-        // meeting complete. Temporary files go with it.
+        // meeting complete.
         TryDeleteJournal();
-        TryCleanupTemporaryFiles();
 
         _pipeline.Dispose();
         _pipeline = null;
 
         var summary = new MeetingSummary(
-            _folder, _metadata, segments, audioPath, warnings, result.RecognitionAudioDirectory);
+            _folder, _metadata, audioPath, warnings, result.RecognitionAudioDirectory);
         _logger.Info(
             nameof(MeetingSessionManager),
-            $"Meeting '{_folder.Name}' finished: {result.Duration:hh\\:mm\\:ss}, {segments.Count} segments, {warnings.Count} warnings.");
+            $"Meeting '{_folder.Name}' finished: {result.Duration:hh\\:mm\\:ss}, {warnings.Count} warnings.");
         return summary;
+    }
+
+    /// <summary>
+    /// Applies the single constant gain that makes the recording comfortable to
+    /// listen back to.
+    /// </summary>
+    /// <remarks>
+    /// This is the only volume adjustment in the application, it happens once,
+    /// after the file is closed and its true peak is known, and it multiplies
+    /// every sample by the same number. Doing it here rather than while
+    /// recording is what makes that possible: a live stage would have to react
+    /// to audio it has not heard yet, which is precisely what an AGC does and
+    /// precisely what this application does not.
+    /// </remarks>
+    private void NormalizeRecording(string audioPath, List<string> warnings)
+    {
+        if (string.IsNullOrWhiteSpace(audioPath) || !File.Exists(audioPath))
+        {
+            return;
+        }
+
+        try
+        {
+            var result = PeakNormalizer.Normalize(audioPath, _settings!.Processing, _logger, _writerFactory);
+            _metadata!.AppliedGainDb = result.Applied ? result.GainDb : null;
+            _metadata.SourceClipped = result.Scan.IsClipped;
+
+            if (result.Scan.IsClipped)
+            {
+                // Say what happened rather than pretend it was fixed: the peaks
+                // were flattened before this application ever saw them.
+                warnings.Add(
+                    $"入力音声が録音時点で既に歪んでいます（全体の {result.Scan.ClippedFraction * 100:F2}% が最大振幅）。"
+                    + "後処理では復元できません。マイクの入力レベルや再生音量を下げて録音し直してください。");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Error(nameof(MeetingSessionManager), "Peak normalization failed; the recording is unchanged.", ex);
+            warnings.Add($"録音後の音量調整に失敗したため、録音した音量のまま保存しました（{ex.Message}）。");
+        }
     }
 
     private string TranscodeToMp3(string wavPath, List<string> warnings)
@@ -291,22 +336,6 @@ public sealed class MeetingSessionManager : IDisposable
         }
     }
 
-    private void TryCleanupTemporaryFiles()
-    {
-        try
-        {
-            var spill = Path.Combine(_folder!.Path, ".stt-spill");
-            if (Directory.Exists(spill))
-            {
-                Directory.Delete(spill, recursive: true);
-            }
-        }
-        catch (IOException ex)
-        {
-            _logger.Warn(nameof(MeetingSessionManager), $"Could not delete temporary files: {ex.Message}");
-        }
-    }
-
     public void Dispose()
     {
         if (_disposed)
@@ -319,20 +348,3 @@ public sealed class MeetingSessionManager : IDisposable
         _journal?.Dispose();
     }
 }
-
-/// <param name="Folder">Where the meeting was written.</param>
-/// <param name="Metadata">Final metadata as saved.</param>
-/// <param name="Segments">Transcript at the moment recording stopped.</param>
-/// <param name="AudioPath">The delivered audio file (WAV or MP3).</param>
-/// <param name="Warnings">Anything the user should know about this recording.</param>
-/// <param name="RecognitionAudioDirectory">
-/// Where the per-stream recognition audio was kept, when the second
-/// transcription pass is going to be offered. Null when it was not captured.
-/// </param>
-public sealed record MeetingSummary(
-    MeetingFolder Folder,
-    MeetingMetadata Metadata,
-    IReadOnlyList<Models.TranscriptSegment> Segments,
-    string AudioPath,
-    IReadOnlyList<string> Warnings,
-    string? RecognitionAudioDirectory = null);

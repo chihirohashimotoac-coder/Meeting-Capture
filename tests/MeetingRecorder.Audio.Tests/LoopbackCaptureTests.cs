@@ -326,14 +326,9 @@ public class RealDeviceRecordingTests
         try
         {
             var audioPath = Path.Combine(root, "meeting.wav");
-            var options = new RecordingPipelineOptions
-            {
-                SampleRate = SampleRate,
-
-                // No model is present here and none is needed: what is under test
-                // is capture, mixing and writing, not recognition.
-                TranscriptionEnabled = false,
-            };
+            // What is under test is capture, mixing and writing. Nothing here
+            // asks for recognition, and the pipeline has no way to perform any.
+            var options = new RecordingPipelineOptions { SampleRate = SampleRate };
 
             var settings = new AppSettings
             {
@@ -344,12 +339,7 @@ public class RealDeviceRecordingTests
 
             using var pipeline = new RecordingPipeline(options, new WasapiCaptureFactory(), new TranscriptStore());
 
-            pipeline.Start(
-                audioPath,
-                settings,
-                recognizer: null,
-                journal: null,
-                spillDirectory: Path.Combine(root, "spill"));
+            pipeline.Start(audioPath, settings, journal: null);
 
             PlayTone(ToneHz, gain: 0.5, seconds: 5);
 

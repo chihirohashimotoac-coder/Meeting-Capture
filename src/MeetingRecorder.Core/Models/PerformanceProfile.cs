@@ -3,41 +3,26 @@ namespace MeetingRecorder.Core.Models;
 /// <summary>
 /// The automatically chosen runtime configuration. The user never picks
 /// "fast / balanced / accurate" - this is derived from a measurement taken on
-/// the actual machine (see <see cref="Benchmark.ProfileSelector"/>).
+/// the actual machine (see <see cref="Benchmark.ProfileSelector"/>), and they
+/// can still override the model in the settings window.
 /// </summary>
+/// <remarks>
+/// This used to carry chunk lengths, overlaps, silence thresholds, a beam size
+/// and a second model id, because a live transcript had to be tuned against the
+/// clock. Nothing runs against the clock any more: transcription happens on a
+/// finished file, with the decoding settings in
+/// <see cref="Stt.SpeechRecognitionOptions"/> and the window lengths in
+/// <see cref="Stt.OfflineTranscriptionService"/>, neither of which depends on
+/// the machine. What is left here is the choice of model, how many threads to
+/// give it, and the evidence behind both.
+/// </remarks>
 public sealed class PerformanceProfile
 {
     /// <summary>Catalog id of the Whisper model that was selected.</summary>
-    public string SttModelId { get; set; } = "whisper-base-q5_1";
+    public string SttModelId { get; set; } = "whisper-small-q5_1";
 
     /// <summary>Threads handed to whisper.cpp. Never all logical cores.</summary>
     public int SttThreads { get; set; } = 4;
-
-    /// <summary>Length of audio handed to one inference call.</summary>
-    public double ChunkSeconds { get; set; } = 8.0;
-
-    /// <summary>
-    /// Audio replayed from the previous chunk so a word split across the seam is
-    /// still recognized once.
-    /// </summary>
-    public int ChunkOverlapMs { get; set; } = 400;
-
-    public bool VadEnabled { get; set; } = true;
-
-    /// <summary>Greedy decoding (beam size 1) is ~2x faster and adequate for meetings.</summary>
-    public int BeamSize { get; set; } = 1;
-
-    /// <summary>
-    /// Silence that ends a live chunk. Shorter means a sentence reaches the
-    /// screen sooner; too short cuts a speaker off mid-thought.
-    /// </summary>
-    public int SilenceFlushMs { get; set; } = 700;
-
-    /// <summary>
-    /// Catalog id of the model for the second, accurate pass. Null when the
-    /// machine cannot hold anything better than the live model.
-    /// </summary>
-    public string? RefinementModelId { get; set; }
 
     public bool DiarizationEnabled { get; set; } = true;
 
@@ -53,10 +38,12 @@ public sealed class PerformanceProfile
     public double CpuScore { get; set; }
 
     /// <summary>
-    /// Real-time factor measured with the real STT engine, if a calibration run
-    /// has happened: inference seconds / audio seconds. &lt; 1 means real time.
+    /// Estimated processing time as a fraction of audio length for the selected
+    /// model on this machine: 1.0 means an hour of meeting takes about an hour
+    /// to transcribe. An estimate, not a measurement - it exists so the settings
+    /// window can warn before someone picks a model that will take all evening.
     /// </summary>
-    public double? MeasuredRealTimeFactor { get; set; }
+    public double EstimatedProcessingFactor { get; set; }
 
     public DateTimeOffset MeasuredAtUtc { get; set; } = DateTimeOffset.UtcNow;
 

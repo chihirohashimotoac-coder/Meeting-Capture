@@ -9,7 +9,13 @@ namespace MeetingRecorder.Core.Models;
 /// </summary>
 public sealed class AppSettings
 {
-    public const int CurrentVersion = 1;
+    /// <summary>
+    /// Bumped to 2 when live transcription was removed. A version 1 file is
+    /// still read: <see cref="Persistence.SettingsStore"/> maps the settings
+    /// that changed meaning and ignores the ones that no longer exist, so an
+    /// upgrade keeps the user's choices instead of resetting them.
+    /// </summary>
+    public const int CurrentVersion = 2;
 
     public int Version { get; set; } = CurrentVersion;
 
@@ -64,12 +70,29 @@ public sealed class AppSettings
 
     // ---- Speech to text --------------------------------------------------
 
-    /// <summary>Catalog id of the Whisper model to use, or null to auto-select.</summary>
+    /// <summary>
+    /// Catalog id of the Whisper model transcription uses, or null to
+    /// auto-select.
+    /// </summary>
+    /// <remarks>
+    /// There is one model setting because there is one transcription pass. The
+    /// application used to keep two - a small one to keep up with the meeting
+    /// and a larger one to redo the job afterwards - and that pair only existed
+    /// to serve live captions, which no longer exist.
+    /// </remarks>
     public string? SttModelId { get; set; }
 
     /// <summary>BCP-47-ish language code handed to whisper.cpp.</summary>
     public string SttLanguage { get; set; } = "ja";
 
+    /// <summary>
+    /// Whether the transcription feature is offered at all.
+    /// </summary>
+    /// <remarks>
+    /// Turning it off does not change how a meeting is recorded. It stops the
+    /// working audio from being kept and greys out the transcription button, for
+    /// someone who only wants the recording.
+    /// </remarks>
     public bool SttEnabled { get; set; } = true;
 
     /// <summary>Folder that stores downloaded AI models. Never inside the repo.</summary>
@@ -79,25 +102,36 @@ public sealed class AppSettings
     public PerformanceProfile? Profile { get; set; }
 
     /// <summary>
-    /// After recording stops, transcribe the meeting again with the accurate
-    /// model and replace the live transcript.
+    /// Keep a per-stream 16 kHz copy of the meeting so it can be transcribed
+    /// afterwards.
     /// </summary>
     /// <remarks>
-    /// The live transcript is tuned for latency and the second pass for accuracy;
-    /// this is what lets both be true. It needs the per-stream recognition audio,
-    /// about 115 MB per hour per stream, kept in the meeting folder while the
-    /// recording is in progress.
+    /// <para>
+    /// This has to be decided before the meeting, not after it: once the
+    /// microphone and the loopback have been summed into one file, which words
+    /// came from the room and which came out of the speakers is gone and cannot
+    /// be worked out again. The cost is about
+    /// <see cref="Pipeline.RecognitionAudioNames.MegabytesPerStreamPerHour"/> MB
+    /// per hour per stream, in the meeting folder.
+    /// </para>
+    /// <para>
+    /// Turning it off leaves an ordinary recording that can still be played and
+    /// kept - it simply cannot be transcribed by this application afterwards.
+    /// </para>
     /// </remarks>
-    public bool RefineTranscriptAfterRecording { get; set; } = true;
+    public bool KeepRecognitionAudio { get; set; } = true;
 
     /// <summary>
-    /// Catalog id of the model used by the second pass, or null to use the
-    /// largest model the machine can hold.
+    /// Delete the working audio once a transcription has completed
+    /// successfully.
     /// </summary>
-    public string? RefinementModelId { get; set; }
-
-    /// <summary>Delete the per-stream recognition audio once the second pass has finished.</summary>
-    public bool DeleteRecognitionAudioAfterRefinement { get; set; } = true;
+    /// <remarks>
+    /// Only after a success. A transcription that failed or that the user
+    /// cancelled leaves the audio exactly where it was, because the obvious next
+    /// thing to do is try again - possibly with a different model - and deleting
+    /// the input would make that impossible.
+    /// </remarks>
+    public bool DeleteRecognitionAudioAfterTranscription { get; set; } = true;
 
     // ---- Optional / experimental ----------------------------------------
 

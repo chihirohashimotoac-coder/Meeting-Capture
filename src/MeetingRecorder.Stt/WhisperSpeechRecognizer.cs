@@ -16,11 +16,13 @@ namespace MeetingRecorder.Stt;
 /// needs no extra build tooling.</para>
 ///
 /// <para><b>No context carry-over.</b> The processor is configured with
-/// <c>WithNoContext</c> because chunks from the microphone and from system audio
-/// are interleaved on one engine instance. Letting whisper condition the remote
-/// participant's sentence on what somebody in the room just said produces
-/// confident, fluent, wrong text - the worst possible failure mode for a
-/// meeting record.</para>
+/// <c>WithNoContext</c> because windows from the microphone file and from the
+/// loopback file are handed to one engine instance. Letting whisper condition
+/// the remote participant's sentence on what somebody in the room just said
+/// produces confident, fluent, wrong text - the worst possible failure mode for
+/// a meeting record. Context <i>within</i> a window is untouched, and windows
+/// are cut at silences close to whisper's full 30-second receptive field, so
+/// this costs nothing that a sentence actually needs.</para>
 ///
 /// <para><b>No fabricated output.</b> Whisper is known to emit boiler-plate
 /// ("ご視聴ありがとうございました") over near-silence. Rather than inventing a
@@ -190,9 +192,9 @@ public sealed class WhisperSpeechRecognizer : ISpeechRecognizer
         }
         else
         {
-            // Greedy decoding is roughly twice as fast as a beam search. The live
-            // pass takes that trade because latency is what it is judged on; the
-            // second pass does not.
+            // Only reachable if a caller explicitly asks for beam size 1.
+            // Transcription does not: nothing is waiting for it, so it pays for
+            // the beam search.
             builder = builder.WithGreedySamplingStrategy().ParentBuilder;
         }
 

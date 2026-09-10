@@ -16,6 +16,36 @@ using MeetingRecorder.Minutes;
 
 namespace MeetingRecorder.App.ViewModels;
 
+/// <summary>
+/// Where a meeting is in the one workflow this application has.
+/// </summary>
+/// <remarks>
+/// <code>
+/// NoAudio -> Recording -> AudioReady -> Transcribing -> TranscriptReady -> (minutes)
+///               import ------^
+/// </code>
+/// Every command's availability is derived from this, which is what keeps the
+/// two halves apart: stopping a recording moves to <see cref="AudioReady"/> and
+/// stops there, and only the user pressing "文字起こし" moves it on.
+/// </remarks>
+public enum MeetingWorkflowState
+{
+    /// <summary>Nothing loaded. Record, or import a file.</summary>
+    NoAudio,
+
+    /// <summary>Capture is running.</summary>
+    Recording,
+
+    /// <summary>Audio exists and is complete. Nothing is being done to it.</summary>
+    AudioReady,
+
+    /// <summary>A transcription the user asked for is running.</summary>
+    Transcribing,
+
+    /// <summary>A transcript exists. Minutes can be generated from it.</summary>
+    TranscriptReady,
+}
+
 /// <summary>View model behind the main window.</summary>
 public sealed class MainViewModel : ObservableObject, IDisposable
 {
@@ -23,14 +53,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private readonly DispatcherTimer _timer;
     private readonly Dictionary<string, TranscriptItemViewModel> _itemsById = new(StringComparer.Ordinal);
     private readonly Stopwatch _tickClock = Stopwatch.StartNew();
+    private readonly TranscriptStore _transcript = new();
 
     private MeetingSessionManager? _session;
-    private ISpeechRecognizer? _recognizer;
-    private ISpeakerDiarizer? _diarizer;
-    private MeetingSummary? _lastSummary;
+    private MeetingSummary? _meeting;
     private TimeSpan _lastTick;
 
-    private string _stateText = "待機中";
+    private MeetingWorkflowState _workflowState = MeetingWorkflowState.NoAudio;
     private string _elapsedText = "00:00:00";
     private double _micLevel;
     private double _systemLevel;
@@ -38,47 +67,48 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private double _systemPeakLevel;
     private string _micLevelText = "-- dBFS";
     private string _systemLevelText = "-- dBFS";
-    private string _sttLatencyText = "文字起こし遅延: -";
+    private string _audioSummaryText = "録音またはインポートした音声はまだありません。";
     private string _saveRootText = string.Empty;
     private string _modelText = string.Empty;
     private string _statusMessage = string.Empty;
     private string _diagnosticsText = string.Empty;
     private string _meetingTitle = string.Empty;
     private string _warningText = string.Empty;
-    private string _refinementStatus = string.Empty;
-    private double _refinementProgress;
-    private bool _isRefining;
-    private bool _isRecording;
+    private string _transcriptionStatus = string.Empty;
+    private double _transcriptionProgress;
     private bool _isBusy;
     private bool _disposed;
 
-    private CancellationTokenSource? _refinementCts;
+    private CancellationTokenSource? _transcriptionCts;
 
     public MainViewModel(AppServices services)
     {
         _services = services;
 
+        _transcript.SegmentAdded += OnSegmentAdded;
+        _transcript.SegmentChanged += OnSegmentChanged;
+        _transcript.SegmentRemoved += OnSegmentRemoved;
+
         StartCommand = new AsyncRelayCommand(StartRecordingAsync, () => !IsRecording && !IsBusy);
         StopCommand = new AsyncRelayCommand(StopRecordingAsync, () => IsRecording && !IsBusy);
+        ImportAudioCommand = new AsyncRelayCommand(ImportAudioAsync, () => !IsRecording && !IsBusy);
         OpenSettingsCommand = new RelayCommand(OpenSettings, () => !IsRecording);
         OpenFolderCommand = new RelayCommand(OpenSaveFolder);
-        GenerateMinutesCommand = new AsyncRelayCommand(GenerateMinutesAsync, () => !IsRecording && !IsBusy && _lastSummary is not null);
-        SaveTranscriptCommand = new RelayCommand(SaveTranscript, () => _session is not null);
-        RenameSpeakerCommand = new RelayCommand(RenameSpeakers, () => Speakers.Count > 0);
+        TranscribeCommand = new AsyncRelayCommand(TranscribeAsync, CanTranscribe);
+        CancelTranscriptionCommand = new RelayCommand(() => _transcriptionCts?.Cancel(), () => IsTranscribing);
+        GenerateMinutesCommand = new AsyncRelayCommand(GenerateMinutesAsync, CanGenerateMinutes);
+        SaveTranscriptCommand = new RelayCommand(SaveTranscript, () => _meeting is not null && Transcript.Count > 0);
+        RenameSpeakerCommand = new RelayCommand(RenameSpeakers, () => CanRenameSpeakers);
         ToggleMicrophoneMuteCommand = new RelayCommand(() => MicrophoneMuted = !MicrophoneMuted);
         ToggleSystemAudioMuteCommand = new RelayCommand(() => SystemAudioMuted = !SystemAudioMuted);
-        RefineTranscriptCommand = new AsyncRelayCommand(
-            () => RefineAsync(automatic: false),
-            () => !IsRecording && !IsBusy && !IsRefining && CanRefine());
-        CancelRefinementCommand = new RelayCommand(() => _refinementCts?.Cancel(), () => IsRefining);
         ExportAudioCommand = new RelayCommand(ExportAudio, () => !IsRecording && LastAudioPath() is not null);
 
         RefreshSettingsDisplay();
 
         _timer = new DispatcherTimer(DispatcherPriority.Background)
         {
-            // 10 Hz: smooth enough for level meters, cheap enough to be invisible
-            // in the CPU graph next to transcription.
+            // 10 Hz: smooth enough for level meters, cheap enough to be
+            // invisible next to a recording.
             Interval = TimeSpan.FromMilliseconds(100),
         };
         _timer.Tick += OnTimerTick;
@@ -92,9 +122,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public AsyncRelayCommand StopCommand { get; }
 
+    public AsyncRelayCommand ImportAudioCommand { get; }
+
     public RelayCommand OpenSettingsCommand { get; }
 
     public RelayCommand OpenFolderCommand { get; }
+
+    public AsyncRelayCommand TranscribeCommand { get; }
+
+    public RelayCommand CancelTranscriptionCommand { get; }
 
     public AsyncRelayCommand GenerateMinutesCommand { get; }
 
@@ -106,11 +142,65 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public RelayCommand ToggleSystemAudioMuteCommand { get; }
 
-    public AsyncRelayCommand RefineTranscriptCommand { get; }
-
-    public RelayCommand CancelRefinementCommand { get; }
-
     public RelayCommand ExportAudioCommand { get; }
+
+    // ---- Workflow state --------------------------------------------------
+
+    public MeetingWorkflowState WorkflowState
+    {
+        get => _workflowState;
+        private set
+        {
+            if (SetProperty(ref _workflowState, value))
+            {
+                OnPropertyChanged(nameof(IsRecording));
+                OnPropertyChanged(nameof(IsIdle));
+                OnPropertyChanged(nameof(IsTranscribing));
+                OnPropertyChanged(nameof(IsNotTranscribing));
+                OnPropertyChanged(nameof(StateText));
+                OnPropertyChanged(nameof(NextStepText));
+                OnPropertyChanged(nameof(CanRenameSpeakers));
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    public bool IsRecording => WorkflowState == MeetingWorkflowState.Recording;
+
+    public bool IsIdle => !IsRecording;
+
+    public bool IsTranscribing => WorkflowState == MeetingWorkflowState.Transcribing;
+
+    public bool IsNotTranscribing => !IsTranscribing;
+
+    /// <summary>The one line that says what the application is doing right now.</summary>
+    public string StateText => WorkflowState switch
+    {
+        MeetingWorkflowState.Recording => "録音中",
+        MeetingWorkflowState.AudioReady => "待機中（音声あり）",
+        MeetingWorkflowState.Transcribing => "文字起こし中",
+        MeetingWorkflowState.TranscriptReady => "文字起こし完了",
+        _ => "待機中",
+    };
+
+    /// <summary>
+    /// What to do next, spelled out. A first-time user should be able to read
+    /// the order - record, stop, transcribe, minutes - off the window itself.
+    /// </summary>
+    public string NextStepText => WorkflowState switch
+    {
+        MeetingWorkflowState.NoAudio =>
+            "① 「録音開始」で録音するか、「音声ファイルをインポート」で既存の音声を読み込みます。",
+        MeetingWorkflowState.Recording =>
+            "② 会議が終わったら「録音停止」を押します。録音中は文字起こしを行いません。",
+        MeetingWorkflowState.AudioReady =>
+            "③ 「文字起こし」を押すと、保存された音声をこのPC内で文字起こしします（録音停止では自動実行されません）。",
+        MeetingWorkflowState.Transcribing =>
+            "文字起こし中です。中止しても録音データはそのまま残ります。",
+        MeetingWorkflowState.TranscriptReady =>
+            "④ 本文を編集して保存できます。必要であれば「議事録を生成」を実行してください。",
+        _ => string.Empty,
+    };
 
     /// <summary>
     /// Silences the microphone leg. Applies immediately, including mid-recording,
@@ -180,39 +270,17 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public bool HasMuteWarning => !string.IsNullOrWhiteSpace(MuteWarningText);
 
-    public bool IsRefining
+    public string TranscriptionStatus
     {
-        get => _isRefining;
-        private set
-        {
-            if (SetProperty(ref _isRefining, value))
-            {
-                OnPropertyChanged(nameof(IsNotRefining));
-                RefineTranscriptCommand.RaiseCanExecuteChanged();
-                CancelRefinementCommand.RaiseCanExecuteChanged();
-            }
-        }
+        get => _transcriptionStatus;
+        private set => SetProperty(ref _transcriptionStatus, value);
     }
 
-    public bool IsNotRefining => !IsRefining;
-
-    public string RefinementStatus
+    /// <summary>0..1, for the transcription progress bar.</summary>
+    public double TranscriptionProgress
     {
-        get => _refinementStatus;
-        private set => SetProperty(ref _refinementStatus, value);
-    }
-
-    /// <summary>0..1, for the progress bar of the second pass.</summary>
-    public double RefinementProgress
-    {
-        get => _refinementProgress;
-        private set => SetProperty(ref _refinementProgress, value);
-    }
-
-    public string StateText
-    {
-        get => _stateText;
-        private set => SetProperty(ref _stateText, value);
+        get => _transcriptionProgress;
+        private set => SetProperty(ref _transcriptionProgress, value);
     }
 
     public string ElapsedText
@@ -258,10 +326,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         private set => SetProperty(ref _systemLevelText, value);
     }
 
-    public string SttLatencyText
+    /// <summary>Which audio is loaded, and whether it can be transcribed.</summary>
+    public string AudioSummaryText
     {
-        get => _sttLatencyText;
-        private set => SetProperty(ref _sttLatencyText, value);
+        get => _audioSummaryText;
+        private set => SetProperty(ref _audioSummaryText, value);
     }
 
     public string SaveRootText
@@ -308,21 +377,6 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         set => SetProperty(ref _meetingTitle, value);
     }
 
-    public bool IsRecording
-    {
-        get => _isRecording;
-        private set
-        {
-            if (SetProperty(ref _isRecording, value))
-            {
-                OnPropertyChanged(nameof(IsIdle));
-                RaiseCommandStates();
-            }
-        }
-    }
-
-    public bool IsIdle => !IsRecording;
-
     public bool IsBusy
     {
         get => _isBusy;
@@ -334,6 +388,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             }
         }
     }
+
+    /// <summary>
+    /// Speaker naming is offered only where the audio can support it.
+    /// </summary>
+    /// <remarks>
+    /// A recording made here has a microphone file and a loopback file, so
+    /// clusters mean something. An imported file is one anonymous source: there
+    /// is nothing to name, and offering the button would imply the application
+    /// knows who is talking when it does not.
+    /// </remarks>
+    public bool CanRenameSpeakers
+        => !IsRecording && !IsTranscribing && Speakers.Count > 0 && _meeting?.HasSourceAttribution == true;
 
     /// <summary>Starts idle monitoring so the meters are live before recording.</summary>
     public void Activate()
@@ -355,8 +421,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         SaveRootText = _services.Settings.SaveRoot ?? "(未設定)";
 
-        var modelId = _services.Settings.Profile?.SttModelId ?? _services.Settings.SttModelId;
-        var descriptor = ModelCatalog.Find(modelId);
+        var descriptor = _services.TranscriptionModel();
 
         if (!_services.Settings.SttEnabled)
         {
@@ -364,15 +429,17 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
         else if (descriptor is null)
         {
-            ModelText = "モデル: 未選択";
+            ModelText = "文字起こしモデル: 未選択";
         }
         else
         {
             var present = _services.ModelStore.IsPresent(descriptor);
             ModelText = present
-                ? $"モデル: {descriptor.DisplayName}"
-                : $"モデル: {descriptor.DisplayName}（未取得）";
+                ? $"文字起こしモデル: {descriptor.DisplayName}"
+                : $"文字起こしモデル: {descriptor.DisplayName}（未取得）";
         }
+
+        TranscribeCommand.RaiseCanExecuteChanged();
     }
 
     private void OnTimerTick(object? sender, EventArgs e)
@@ -383,8 +450,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
         if (IsRecording && _session is not null)
         {
-            var status = _session.GetStatus();
-            UpdateFromStatus(status);
+            UpdateFromStatus(_session.GetStatus());
         }
         else
         {
@@ -398,16 +464,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         ElapsedText = FormatDuration(status.Elapsed);
         UpdateMeters(status.MicLevel, status.SystemLevel);
 
-        var stt = status.Stt;
-        SttLatencyText = stt.QueuedChunks == 0 && stt.ProcessedChunks == 0
-            ? "文字起こし遅延: -"
-            : $"文字起こし処理遅延: {stt.LatencySeconds:F0}秒（未処理 {stt.QueuedChunks} 件 / {stt.QueuedSeconds:F0}秒）";
-
         var resources = _services.PerformanceMonitor.Sample();
         DiagnosticsText =
             $"CPU {resources.CpuPercent:F0}% / RAM {resources.WorkingSetMb:F0}MB / " +
-            $"RTF {(stt.RealTimeFactor > 0 ? stt.RealTimeFactor.ToString("F2") : "-")} / " +
-            $"バックログ {stt.QueuedSeconds:F0}s / ディスク退避 {stt.SpilledChunks} / " +
+            $"書き込み {status.BytesWritten / 1024.0 / 1024.0:F0}MB / " +
             $"バッファ溢れ {status.BufferOverruns} / 無音補間 {status.SilenceInsertedMs / 1000.0:F1}s / " +
             $"同期補正 {status.DriftCorrectedMs:F0}ms";
 
@@ -436,6 +496,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private static string FormatDuration(TimeSpan value)
         => $"{(int)value.TotalHours:00}:{value.Minutes:00}:{value.Seconds:00}";
 
+    // ---- Recording -------------------------------------------------------
+
     private async Task StartRecordingAsync()
     {
         IsBusy = true;
@@ -448,45 +510,34 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             _services.LevelMonitor.Stop();
 
             var results = await Task.Run(() => _services.PreflightChecker.Run(_services.Settings));
-            if (!PreflightDialog.Confirm(Application.Current.MainWindow, results))
+            if (!PreflightDialog.Confirm(Application.Current?.MainWindow, results))
             {
                 StatusMessage = "録音を開始しませんでした。";
                 _services.LevelMonitor.Start(_services.Settings);
                 return;
             }
 
-            _recognizer = _services.TryCreateRecognizer(out var reason);
-            if (_recognizer is null && !string.IsNullOrWhiteSpace(reason))
-            {
-                WarningText = reason!;
-            }
-
-            _diarizer = _services.TryCreateDiarizer();
-
             // Release the previous meeting's session before starting another.
             _session?.Dispose();
-
             _session = new MeetingSessionManager(
                 _services.CaptureFactory,
                 _services.Transcoder,
                 _services.SleepPreventer,
-                _services.Logger);
+                _services.Logger,
+                writerFactory: null,
+                transcript: _transcript);
 
-            _session.Transcript.SegmentAdded += OnSegmentAdded;
-            _session.Transcript.SegmentChanged += OnSegmentChanged;
-            _session.Transcript.SegmentRemoved += OnSegmentRemoved;
             _session.Fault += OnCaptureFault;
 
-            Transcript.Clear();
-            Speakers.Clear();
-            _itemsById.Clear();
+            ClearTranscript();
+            _meeting = null;
 
             var title = string.IsNullOrWhiteSpace(MeetingTitle) ? null : MeetingTitle.Trim();
 
             // With automatic saving off the meeting is still recorded to disk,
             // just not into the save folder: it goes to a working area and stays
             // there until the user exports it. Everything downstream - the
-            // journal, crash recovery, the second pass - is unchanged, because
+            // journal, crash recovery, transcription - is unchanged, because
             // only the root differs.
             var settings = _services.Settings;
             if (!settings.AutoSaveRecordings)
@@ -495,14 +546,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 settings.SaveRoot = AppPaths.WorkingRecordingRoot;
             }
 
-            var folder = _session.Start(settings, _recognizer, _diarizer, title);
+            var folder = _session.Start(settings, title);
 
-            IsRecording = true;
-            StateText = "録音中";
+            WorkflowState = MeetingWorkflowState.Recording;
             StatusMessage = _services.Settings.AutoSaveRecordings
                 ? $"録音中: {folder.Path}"
                 : $"録音中（自動保存オフ・作業用フォルダー）: {folder.Path}";
-            _lastSummary = null;
+            AudioSummaryText = "録音中です。文字起こしは停止後に手動で実行します。";
         }
         catch (Exception ex)
         {
@@ -513,8 +563,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
 
-            StateText = "待機中";
-            IsRecording = false;
+            WorkflowState = MeetingWorkflowState.NoAudio;
             _services.LevelMonitor.Start(_services.Settings);
         }
         finally
@@ -523,6 +572,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// Stops the recording. It does not start a transcription, and nothing else
+    /// in this method does either.
+    /// </summary>
     private async Task StopRecordingAsync()
     {
         if (_session is null)
@@ -531,30 +584,26 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
 
         IsBusy = true;
-        StateText = "停止処理中";
-        StatusMessage = "録音を停止し、残りの文字起こしを処理しています...";
+        StatusMessage = "録音を停止しています...";
 
         try
         {
             var session = _session;
-            var summary = await Task.Run(() => session.Stop(TimeSpan.FromMinutes(10)));
-            _lastSummary = summary;
+            var summary = await Task.Run(session.Stop);
+            _meeting = summary;
 
-            IsRecording = false;
-            StateText = "待機中";
             ElapsedText = FormatDuration(summary.Metadata.Duration);
+            WorkflowState = MeetingWorkflowState.AudioReady;
             StatusMessage = _services.Settings.AutoSaveRecordings
-                ? $"保存しました: {summary.Folder.Path}"
-                : "自動保存はオフです。「音声を出力...」で保存先を指定してください（データは作業用フォルダーに残っています）。";
+                ? $"録音を停止しました: {summary.Folder.Path}"
+                : "録音を停止しました。自動保存はオフです。「音声を出力...」で保存先を指定してください。";
+
+            RefreshAudioSummary();
 
             if (summary.Warnings.Count > 0)
             {
                 WarningText = string.Join(" / ", summary.Warnings);
             }
-
-            RefreshSpeakers();
-            RefineTranscriptCommand.RaiseCanExecuteChanged();
-            ExportAudioCommand.RaiseCanExecuteChanged();
         }
         catch (Exception ex)
         {
@@ -564,164 +613,297 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 "MeetingRecorder",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
+            WorkflowState = MeetingWorkflowState.AudioReady;
         }
         finally
         {
-            _recognizer?.Dispose();
-            _recognizer = null;
-            _diarizer?.Dispose();
-            _diarizer = null;
-
             IsBusy = false;
-            IsRecording = false;
             _services.LevelMonitor.Start(_services.Settings);
-        }
-
-        // The recording is saved and the folder is complete before this starts,
-        // so a failure here costs the accurate transcript and nothing else.
-        if (_services.Settings.RefineTranscriptAfterRecording && CanRefine())
-        {
-            await RefineAsync(automatic: true);
+            RaiseCommandStates();
         }
     }
 
-    // ---- Second transcription pass --------------------------------------
+    // ---- Import ----------------------------------------------------------
+
+    private async Task ImportAudioAsync()
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "文字起こしする音声ファイルを選択",
+            Filter = AudioImportFormats.FileDialogFilter,
+            Multiselect = false,
+            CheckFileExists = true,
+        };
+
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var path = dialog.FileName;
+        IsBusy = true;
+        WarningText = string.Empty;
+        StatusMessage = $"「{Path.GetFileName(path)}」を読み込んでいます...";
+
+        try
+        {
+            var settings = _services.Settings;
+            var summary = await Task.Run(() => _services.MeetingImporter.Import(settings, path));
+
+            _session?.Dispose();
+            _session = null;
+
+            ClearTranscript();
+            _meeting = summary;
+            ElapsedText = FormatDuration(summary.Metadata.Duration);
+            WorkflowState = MeetingWorkflowState.AudioReady;
+            StatusMessage = $"読み込みました: {summary.Folder.Path}（元のファイルは変更していません）";
+            RefreshAudioSummary();
+
+            if (summary.Warnings.Count > 0)
+            {
+                WarningText = string.Join(" / ", summary.Warnings);
+            }
+        }
+        catch (Exception ex)
+        {
+            _services.Logger.Error(nameof(MainViewModel), $"Importing '{path}' failed.", ex);
+            MessageBox.Show(
+                $"音声ファイルを読み込めませんでした。\n元のファイルは変更していません。\n\n{ex.Message}",
+                "MeetingRecorder",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            StatusMessage = "音声ファイルの読み込みに失敗しました。";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    // ---- Transcription ---------------------------------------------------
 
     /// <summary>The audio the export button would write, or null when there is none.</summary>
     private string? LastAudioPath()
     {
-        var path = _lastSummary?.AudioPath;
+        var path = _meeting?.AudioPath;
         return !string.IsNullOrWhiteSpace(path) && File.Exists(path) ? path : null;
     }
 
-    private bool CanRefine()
-        => _lastSummary is not null
-           && RecognitionAudioNames.ExistIn(_lastSummary.RecognitionAudioDirectory ?? _lastSummary.Folder.Path);
+    private bool CanTranscribe()
+        => _meeting is not null
+           && !IsRecording
+           && !IsTranscribing
+           && !IsBusy
+           && _services.Settings.SttEnabled
+           && (_meeting.CanTranscribe || CanRebuildWorkingAudio(_meeting));
+
+    private static bool CanRebuildWorkingAudio(MeetingSummary meeting)
+        => meeting.IsImported
+           && !string.IsNullOrWhiteSpace(meeting.Metadata.ImportedFromPath)
+           && File.Exists(meeting.Metadata.ImportedFromPath!);
+
+    private bool CanGenerateMinutes()
+        => _meeting is not null && !IsRecording && !IsTranscribing && !IsBusy && Transcript.Count > 0;
 
     /// <summary>
-    /// Re-transcribes the finished meeting with the accurate model and replaces
-    /// the live transcript.
+    /// Transcribes the audio that is loaded. Reached only from the button.
     /// </summary>
-    /// <param name="automatic">
-    /// True when this ran on its own after Stop. An automatic run reports
-    /// problems quietly in the status line; one the user asked for gets a dialog,
-    /// because they are waiting for an answer.
-    /// </param>
-    private async Task RefineAsync(bool automatic)
+    /// <remarks>
+    /// This is the only place in the application that loads a speech model. It
+    /// runs on a thread-pool thread over a file that is already closed, so
+    /// nothing it does - not the model load, not the inference, not the speaker
+    /// clustering - can touch a recording. There is no recording while it runs:
+    /// <see cref="CanTranscribe"/> refuses to start one during capture, and
+    /// starting a recording is refused while this is running.
+    /// </remarks>
+    private async Task TranscribeAsync()
     {
-        var summary = _lastSummary;
-        if (summary is null || IsRefining)
+        var meeting = _meeting;
+        if (meeting is null || IsTranscribing)
+        {
+            // Guard against a double press: the command is disabled while this
+            // runs, but a command can still be invoked from a binding twice
+            // before the state change lands.
+            return;
+        }
+
+        if (!meeting.CanTranscribe && !TryRebuildWorkingAudio(meeting))
         {
             return;
         }
 
-        var directory = summary.RecognitionAudioDirectory ?? summary.Folder.Path;
-        if (!RecognitionAudioNames.ExistIn(directory))
-        {
-            Report("再文字起こし用の音声がありません。設定の「停止後に高精度で文字起こしをやり直す」を有効にして録音してください。", automatic);
-            return;
-        }
-
-        var recognizer = _services.TryCreateRefinementRecognizer(out var reason);
+        var recognizer = _services.TryCreateTranscriptionRecognizer(out var reason);
         if (recognizer is null)
         {
-            Report(reason ?? "高精度モデルを利用できません。", automatic);
+            var message = reason ?? "文字起こしを開始できません。";
+            TranscriptionStatus = message;
+            StatusMessage = message;
+            MessageBox.Show(message, "MeetingRecorder", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
-        _refinementCts = new CancellationTokenSource();
-        IsRefining = true;
-        RefinementProgress = 0;
-        RefinementStatus = "高精度で文字起こしをやり直しています...";
+        var diarizer = meeting.HasSourceAttribution ? _services.TryCreateDiarizer() : null;
+        _transcriptionCts = new CancellationTokenSource();
+        WorkflowState = MeetingWorkflowState.Transcribing;
+        TranscriptionProgress = 0;
+        TranscriptionStatus = "文字起こしの準備をしています...";
 
-        // Fully qualified: this view model also has a RefinementProgress property.
-        var progress = new Progress<MeetingRecorder.Core.Stt.RefinementProgress>(p =>
+        // Fully qualified: this view model has a TranscriptionProgress property
+        // of its own.
+        var progress = new Progress<MeetingRecorder.Core.Stt.TranscriptionProgress>(p =>
         {
-            RefinementProgress = p.Fraction;
-            RefinementStatus =
-                $"高精度で文字起こしをやり直しています... {p.Fraction * 100:F0}%"
+            TranscriptionProgress = p.Fraction;
+            TranscriptionStatus =
+                $"文字起こし中... {p.Fraction * 100:F0}%"
                 + $"（{TimeSpan.FromSeconds(p.ProcessedSeconds):mm\\:ss} / {TimeSpan.FromSeconds(p.TotalSeconds):mm\\:ss}）";
         });
 
+        var outcome = TranscriptionOutcome.Failed;
         try
         {
-            var previous = _session?.Transcript.Snapshot() ?? summary.Segments;
-            var token = _refinementCts.Token;
+            var previous = _transcript.Snapshot();
+            var token = _transcriptionCts.Token;
+            var language = _services.Settings.SttLanguage;
+            var sources = meeting.TranscriptionSources;
 
-            var refined = await Task.Run(() => new TranscriptionRefiner(_services.Logger).Refine(
-                RecognitionAudioNames.SourcesIn(directory),
+            var segments = await Task.Run(() => new OfflineTranscriptionService(_services.Logger).Transcribe(
+                sources,
                 recognizer,
-                _services.Settings.SttLanguage,
+                language,
                 previous,
                 progress,
+                diarizer,
                 token));
 
-            // Replacing rather than merging: the second pass produces its own
+            // Replacing rather than merging: a transcription produces its own
             // segmentation, and interleaving two of them would read as neither.
-            _session?.Transcript.ReplaceAll(refined);
-            _session?.SaveTranscript();
+            _transcript.ReplaceAll(segments);
 
-            RefinementStatus = $"高精度の文字起こしに置き換えました（{refined.Count} 件）。";
-            StatusMessage = RefinementStatus;
+            meeting.Metadata.SttModelId = recognizer.ModelId;
+            meeting.Metadata.DiarizationUsed = segments.Any(s => s.SpeakerId.HasValue);
+            meeting.SaveTranscript(_transcript.Snapshot(), _transcript.SpeakerNames);
+
+            outcome = TranscriptionOutcome.Completed;
+            WorkflowState = MeetingWorkflowState.TranscriptReady;
+            TranscriptionStatus = $"文字起こしが完了しました（{segments.Count} 件）。";
+            StatusMessage = $"{TranscriptionStatus} 保存先: {meeting.Folder.Path}";
             RefreshSpeakers();
-
-            if (_services.Settings.DeleteRecognitionAudioAfterRefinement)
-            {
-                DeleteRecognitionAudio(directory);
-            }
         }
         catch (OperationCanceledException)
         {
-            // The live transcript is still on screen, so cancelling costs nothing
-            // but the time already spent.
-            RefinementStatus = "再文字起こしを中止しました。速報の文字起こしはそのまま残っています。";
+            // Cancelling costs the time already spent and nothing else. The
+            // audio - both the recording and the working copy - is untouched.
+            outcome = TranscriptionOutcome.Cancelled;
+            TranscriptionStatus = "文字起こしを中止しました。音声はそのまま残っています。";
+            StatusMessage = TranscriptionStatus;
+            WorkflowState = Transcript.Count > 0 ? MeetingWorkflowState.TranscriptReady : MeetingWorkflowState.AudioReady;
         }
         catch (Exception ex)
         {
-            _services.Logger.Error(nameof(MainViewModel), "Refining the transcript failed.", ex);
-            RefinementStatus = $"再文字起こしに失敗しました（{ex.Message}）。速報の文字起こしはそのまま残っています。";
-            Report(RefinementStatus, automatic);
+            _services.Logger.Error(nameof(MainViewModel), "Transcription failed.", ex);
+            TranscriptionStatus = $"文字起こしに失敗しました（{ex.Message}）。音声はそのまま残っています。";
+            StatusMessage = TranscriptionStatus;
+            WorkflowState = Transcript.Count > 0 ? MeetingWorkflowState.TranscriptReady : MeetingWorkflowState.AudioReady;
+            MessageBox.Show(
+                $"文字起こしに失敗しました。\n録音した音声は保存先フォルダーにそのまま残っています。\n\n{ex.Message}",
+                "MeetingRecorder",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
         }
         finally
         {
             recognizer.Dispose();
-            _refinementCts?.Dispose();
-            _refinementCts = null;
-            IsRefining = false;
-            RefinementProgress = 0;
-            RefineTranscriptCommand.RaiseCanExecuteChanged();
+            diarizer?.Dispose();
+            _transcriptionCts?.Dispose();
+            _transcriptionCts = null;
+            TranscriptionProgress = 0;
+
+            // Only a completed transcription may delete its own input. A failure
+            // or a cancellation leaves it, because the obvious next step is to
+            // try again - possibly with a different model.
+            RecognitionAudioCleanup.DeleteIfAppropriate(
+                meeting.RecognitionAudioDirectory ?? meeting.Folder.Path,
+                outcome,
+                _services.Settings.DeleteRecognitionAudioAfterTranscription,
+                _services.Logger);
+
+            RefreshAudioSummary();
+            RaiseCommandStates();
         }
     }
 
-    private void Report(string message, bool automatic)
+    /// <summary>
+    /// Re-creates the working audio for an imported meeting whose copy was
+    /// deleted after a previous transcription.
+    /// </summary>
+    private bool TryRebuildWorkingAudio(MeetingSummary meeting)
     {
-        RefinementStatus = message;
-        StatusMessage = message;
-
-        if (!automatic)
+        if (!CanRebuildWorkingAudio(meeting))
         {
+            var message = meeting.IsImported
+                ? "文字起こし用の音声が削除されており、元のファイルも見つかりません。"
+                  + "元のファイルを同じ場所に戻すか、もう一度インポートしてください。"
+                : "この録音には文字起こし用の音声がありません。"
+                  + "設定の「文字起こし用の音声を保存する」を有効にして録音した会議でのみ実行できます。";
+
+            TranscriptionStatus = message;
+            StatusMessage = message;
             MessageBox.Show(message, "MeetingRecorder", MessageBoxButton.OK, MessageBoxImage.Information);
+            return false;
         }
+
+        StatusMessage = "元のファイルから作業用音声を作り直しています...";
+        if (_services.MeetingImporter.TryReimport(meeting, _services.Settings, out var reason))
+        {
+            return true;
+        }
+
+        TranscriptionStatus = reason ?? "作業用音声を作り直せませんでした。";
+        StatusMessage = TranscriptionStatus;
+        MessageBox.Show(TranscriptionStatus, "MeetingRecorder", MessageBoxButton.OK, MessageBoxImage.Warning);
+        return false;
     }
 
-    private void DeleteRecognitionAudio(string directory)
+    /// <summary>
+    /// Says what audio is loaded and whether it can (still) be transcribed, so
+    /// the relationship between the delete setting and re-transcribing is
+    /// visible rather than discovered.
+    /// </summary>
+    private void RefreshAudioSummary()
     {
-        foreach (var name in new[] { RecognitionAudioNames.Microphone, RecognitionAudioNames.SystemAudio })
+        var meeting = _meeting;
+        if (meeting is null)
         {
-            try
-            {
-                var path = Path.Combine(directory, name);
-                if (File.Exists(path))
-                {
-                    File.Delete(path);
-                }
-            }
-            catch (IOException ex)
-            {
-                // Leaving a few hundred megabytes behind is untidy, not harmful.
-                _services.Logger.Warn(nameof(MainViewModel), $"Could not delete '{name}': {ex.Message}");
-            }
+            AudioSummaryText = "録音またはインポートした音声はまだありません。";
+            return;
         }
+
+        var what = meeting.IsImported
+            ? $"インポート: {Path.GetFileName(meeting.Metadata.AudioFileName)}"
+            : $"録音: {meeting.Folder.Name}";
+
+        string transcription;
+        if (meeting.CanTranscribe)
+        {
+            transcription = meeting.HasSourceAttribution
+                ? "文字起こし可能（マイク／PC音声を別々に保持）"
+                : "文字起こし可能（1系統・話者は判別しません）";
+        }
+        else if (CanRebuildWorkingAudio(meeting))
+        {
+            transcription = "作業用音声は削除済み。元のファイルから作り直して再実行できます";
+        }
+        else if (meeting.IsImported)
+        {
+            transcription = "作業用音声が削除され、元のファイルも見つかりません（再文字起こし不可）";
+        }
+        else
+        {
+            transcription = "作業用音声がないため文字起こしできません";
+        }
+
+        AudioSummaryText = $"{what} / {FormatDuration(meeting.Metadata.Duration)} / {transcription}";
     }
 
     /// <summary>Writes the finished recording wherever the user chooses.</summary>
@@ -731,7 +913,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         if (source is null)
         {
             MessageBox.Show(
-                "出力できる録音がありません。録音を停止したあとで実行してください。",
+                "出力できる音声がありません。録音を停止するか、音声ファイルをインポートしてください。",
                 "MeetingRecorder",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
@@ -746,7 +928,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             Filter = extension.Equals(".mp3", StringComparison.OrdinalIgnoreCase)
                 ? "MP3 音声 (*.mp3)|*.mp3|すべてのファイル (*.*)|*.*"
                 : "WAV 音声 (*.wav)|*.wav|すべてのファイル (*.*)|*.*",
-            Title = "録音した音声の出力先",
+            Title = "音声の出力先",
             OverwritePrompt = true,
         };
 
@@ -767,17 +949,33 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             _services.Logger.Error(nameof(MainViewModel), "Exporting the recording failed.", ex);
             MessageBox.Show(
-                $"音声の出力に失敗しました。\n録音データは保存先フォルダーに残っています。\n\n{ex.Message}",
+                $"音声の出力に失敗しました。\n元のデータは保存先フォルダーに残っています。\n\n{ex.Message}",
                 "MeetingRecorder",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
         }
     }
 
+    // ---- Transcript view -------------------------------------------------
+
+    private void ClearTranscript()
+    {
+        _transcript.Clear();
+        foreach (var item in _itemsById.Values)
+        {
+            item.TextEdited -= OnItemTextEdited;
+        }
+
+        _itemsById.Clear();
+        Transcript.Clear();
+        Speakers.Clear();
+        TranscriptionStatus = string.Empty;
+        TranscriptionProgress = 0;
+    }
+
     private void OnSegmentAdded(TranscriptSegment segment)
     {
-        // Raised on the transcription worker thread.
-        Application.Current?.Dispatcher.BeginInvoke(() =>
+        Dispatch(() =>
         {
             var item = new TranscriptItemViewModel(segment);
             item.TextEdited += OnItemTextEdited;
@@ -789,12 +987,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 Speakers.Add(new SpeakerViewModel(segment.Source, segment.SpeakerId.Value, segment.SpeakerName));
                 RenameSpeakerCommand.RaiseCanExecuteChanged();
             }
+
+            SaveTranscriptCommand.RaiseCanExecuteChanged();
+            GenerateMinutesCommand.RaiseCanExecuteChanged();
         });
     }
 
     private void OnSegmentRemoved(TranscriptSegment segment)
     {
-        Application.Current?.Dispatcher.BeginInvoke(() =>
+        Dispatch(() =>
         {
             if (_itemsById.Remove(segment.Id, out var item))
             {
@@ -806,7 +1007,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void OnSegmentChanged(TranscriptSegment segment)
     {
-        Application.Current?.Dispatcher.BeginInvoke(() =>
+        Dispatch(() =>
         {
             if (_itemsById.TryGetValue(segment.Id, out var item))
             {
@@ -815,48 +1016,76 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         });
     }
 
+    /// <summary>
+    /// Runs on the UI thread when there is one, and inline when there is not.
+    /// </summary>
+    /// <remarks>
+    /// Transcript events now arrive on a thread-pool thread rather than a
+    /// transcription worker, but the requirement is the same and so is the
+    /// answer. The inline path keeps the view model usable in a test host with
+    /// no <see cref="Application"/>.
+    /// </remarks>
+    private static void Dispatch(Action action)
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess())
+        {
+            action();
+            return;
+        }
+
+        dispatcher.BeginInvoke(action);
+    }
+
     private void OnItemTextEdited(object? sender, string text)
     {
         if (sender is TranscriptItemViewModel item)
         {
-            _session?.Transcript.EditText(item.Id, text);
+            _transcript.EditText(item.Id, text);
         }
     }
 
     private void OnCaptureFault(object? sender, CaptureFault fault)
     {
-        Application.Current?.Dispatcher.BeginInvoke(() =>
-        {
-            WarningText = fault.Message;
-        });
+        Dispatch(() => WarningText = fault.Message);
     }
 
     private void RefreshSpeakers()
     {
-        if (_session is null)
+        Dispatch(() =>
         {
-            return;
-        }
+            Speakers.Clear();
+            foreach (var (source, speakerId, name) in _transcript.Speakers())
+            {
+                Speakers.Add(new SpeakerViewModel(source, speakerId, name));
+            }
 
-        Speakers.Clear();
-        foreach (var (source, speakerId, name) in _session.Transcript.Speakers())
-        {
-            Speakers.Add(new SpeakerViewModel(source, speakerId, name));
-        }
-
-        RenameSpeakerCommand.RaiseCanExecuteChanged();
+            OnPropertyChanged(nameof(CanRenameSpeakers));
+            RenameSpeakerCommand.RaiseCanExecuteChanged();
+        });
     }
 
     private void RenameSpeakers()
     {
-        if (_session is null || Speakers.Count == 0)
+        if (_meeting is null || Speakers.Count == 0)
         {
+            return;
+        }
+
+        if (!_meeting.HasSourceAttribution)
+        {
+            MessageBox.Show(
+                "インポートした音声は1つの音源しかないため、話者を特定できません。"
+                + "話者名の編集は、このアプリで録音した会議（マイクとPC音声を別々に保持したもの）でのみ行えます。",
+                "MeetingRecorder",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
             return;
         }
 
         var dialog = new SpeakerRenameWindow(Speakers.ToList())
         {
-            Owner = Application.Current.MainWindow,
+            Owner = Application.Current?.MainWindow,
         };
 
         if (dialog.ShowDialog() != true)
@@ -868,11 +1097,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             if (!string.IsNullOrWhiteSpace(speaker.DisplayName) && speaker.DisplayName != speaker.DefaultLabel)
             {
-                _session.Transcript.RenameSpeaker(speaker.Source, speaker.SpeakerId, speaker.DisplayName.Trim());
+                _transcript.RenameSpeaker(speaker.Source, speaker.SpeakerId, speaker.DisplayName.Trim());
             }
         }
 
-        _session.SaveTranscript();
+        SaveTranscript();
         StatusMessage = "話者名を反映し、文字起こしを保存しました。";
     }
 
@@ -880,7 +1109,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         try
         {
-            _session?.SaveTranscript();
+            _meeting?.SaveTranscript(_transcript.Snapshot(), _transcript.SpeakerNames);
             StatusMessage = "文字起こしを保存しました。";
         }
         catch (Exception ex)
@@ -890,10 +1119,23 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    // ---- Minutes ---------------------------------------------------------
+
     private async Task GenerateMinutesAsync()
     {
-        if (_lastSummary is null)
+        var meeting = _meeting;
+        var segments = _transcript.Snapshot();
+
+        if (meeting is null || segments.Count == 0)
         {
+            // Minutes are made from a transcript, so there has to be one. A
+            // recording on its own is not enough and the command is disabled
+            // until it is transcribed.
+            MessageBox.Show(
+                "議事録は文字起こしの結果から作成します。先に「文字起こし」を実行してください。",
+                "MeetingRecorder",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
             return;
         }
 
@@ -903,8 +1145,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         IMinutesGenerator? generator = null;
         try
         {
-            var segments = _session?.Transcript.Snapshot() ?? _lastSummary.Segments;
-            var request = new MinutesRequest(_lastSummary.Metadata, segments);
+            var request = new MinutesRequest(meeting.Metadata, segments);
 
             generator = CreateMinutesGenerator();
             var progress = new Progress<MinutesProgress>(p =>
@@ -916,13 +1157,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             var document = await generator.GenerateAsync(request, progress);
 
-            await File.WriteAllTextAsync(_lastSummary.Folder.MinutesMarkdownPath, document.Markdown, new System.Text.UTF8Encoding(true));
-            await File.WriteAllTextAsync(_lastSummary.Folder.MinutesTextPath, document.PlainText, new System.Text.UTF8Encoding(true));
+            await File.WriteAllTextAsync(meeting.Folder.MinutesMarkdownPath, document.Markdown, new System.Text.UTF8Encoding(true));
+            await File.WriteAllTextAsync(meeting.Folder.MinutesTextPath, document.PlainText, new System.Text.UTF8Encoding(true));
 
-            _lastSummary.Metadata.MinutesGenerated = true;
-            _lastSummary.Folder.WriteMetadata(_lastSummary.Metadata);
+            meeting.Metadata.MinutesGenerated = true;
+            meeting.Save();
 
-            StatusMessage = $"議事録を保存しました（{document.GeneratorName}）: {_lastSummary.Folder.MinutesMarkdownPath}";
+            StatusMessage = $"議事録を保存しました（{document.GeneratorName}）: {meeting.Folder.MinutesMarkdownPath}";
 
             if (document.Warnings.Count > 0)
             {
@@ -963,11 +1204,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             logger: _services.Logger);
     }
 
+    // ---- Window plumbing -------------------------------------------------
+
     private void OpenSettings()
     {
         _services.LevelMonitor.Stop();
 
-        var window = new SettingsWindow(_services) { Owner = Application.Current.MainWindow };
+        var window = new SettingsWindow(_services) { Owner = Application.Current?.MainWindow };
         window.ShowDialog();
 
         RefreshSettingsDisplay();
@@ -976,7 +1219,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private void OpenSaveFolder()
     {
-        var path = _lastSummary?.Folder.Path ?? _services.Settings.SaveRoot;
+        var path = _meeting?.Folder.Path ?? _services.Settings.SaveRoot;
         if (string.IsNullOrWhiteSpace(path))
         {
             return;
@@ -997,33 +1240,55 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         StartCommand.RaiseCanExecuteChanged();
         StopCommand.RaiseCanExecuteChanged();
+        ImportAudioCommand.RaiseCanExecuteChanged();
         OpenSettingsCommand.RaiseCanExecuteChanged();
+        TranscribeCommand.RaiseCanExecuteChanged();
+        CancelTranscriptionCommand.RaiseCanExecuteChanged();
         GenerateMinutesCommand.RaiseCanExecuteChanged();
         SaveTranscriptCommand.RaiseCanExecuteChanged();
+        RenameSpeakerCommand.RaiseCanExecuteChanged();
+        ExportAudioCommand.RaiseCanExecuteChanged();
+        OnPropertyChanged(nameof(CanRenameSpeakers));
     }
 
     /// <summary>Called when the window is closing while a recording is running.</summary>
     public bool ConfirmClose()
     {
+        if (IsTranscribing)
+        {
+            var answer = MessageBox.Show(
+                "文字起こしの実行中です。終了すると中止されます。録音した音声は残ります。よろしいですか？",
+                "MeetingRecorder",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+
+            if (answer != MessageBoxResult.Yes)
+            {
+                return false;
+            }
+
+            _transcriptionCts?.Cancel();
+        }
+
         if (!IsRecording)
         {
             return ConfirmUnsavedRecordings();
         }
 
-        var answer = MessageBox.Show(
+        var recordingAnswer = MessageBox.Show(
             "録音中です。終了すると録音を停止して保存します。よろしいですか？",
             "MeetingRecorder",
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
 
-        if (answer != MessageBoxResult.Yes)
+        if (recordingAnswer != MessageBoxResult.Yes)
         {
             return false;
         }
 
         try
         {
-            _session?.Stop(TimeSpan.FromSeconds(30));
+            _session?.Stop();
         }
         catch (Exception ex)
         {
@@ -1083,8 +1348,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _disposed = true;
         _timer.Stop();
         _timer.Tick -= OnTimerTick;
+        _transcriptionCts?.Cancel();
+        _transcriptionCts?.Dispose();
         _session?.Dispose();
-        _recognizer?.Dispose();
-        _diarizer?.Dispose();
     }
 }

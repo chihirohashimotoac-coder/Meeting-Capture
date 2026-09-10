@@ -3,6 +3,7 @@ using System.Text;
 using MeetingRecorder.Core.Audio;
 using MeetingRecorder.Core.Dsp;
 using MeetingRecorder.Core.Models;
+using MeetingRecorder.Core.Pipeline;
 using MeetingRecorder.Core.Stt;
 using Xunit;
 using Xunit.Abstractions;
@@ -21,11 +22,13 @@ namespace MeetingRecorder.Stt.Tests;
 /// whole path produces text rather than silence - none of which a fake can show.
 /// </para>
 /// <para>
-/// It needs a model (~31 MB) and an audio file, so it is driven by environment
-/// variables and skipped when they are absent. CI sets
+/// It needs a model and an audio file, so it is driven by environment variables
+/// and skipped when they are absent. CI sets
 /// <c>MEETINGRECORDER_REQUIRE_REAL_STT=1</c>, which turns a skip into a failure -
 /// otherwise a broken CI step could quietly stop running this and nobody would
-/// notice.
+/// notice. Pointing <c>MEETINGRECORDER_TEST_MODEL</c> at a different model file
+/// is how a candidate for the catalog is checked against the real engine (see
+/// <c>.github/workflows/model-evaluation.yml</c>).
 /// </para>
 /// <para>
 /// <b>What this does not establish:</b> the audio is machine-synthesised speech,
@@ -97,7 +100,7 @@ public class RealModelRecognitionTests
         var audio = LoadAudioAt16k();
         var audioSeconds = audio.Length / (double)SpeechConstants.SampleRate;
 
-        using var recognizer = new WhisperSpeechRecognizer(ModelPath!, "test-model", SpeechRecognitionOptions.Live(2, Language));
+        using var recognizer = new WhisperSpeechRecognizer(ModelPath!, "test-model", SpeechRecognitionOptions.Offline(2, Language));
         Assert.True(recognizer.IsReady);
 
         var stopwatch = Stopwatch.StartNew();
@@ -139,79 +142,54 @@ public class RealModelRecognitionTests
     }
 
     [Fact]
-    public void TheFullChunkerAndSchedulerPathProducesSegmentsFromRealSpeech()
+    public void TheFullOfflinePathProducesSegmentsFromRealSpeech()
     {
         if (!HaveFixtures())
         {
             return;
         }
 
-        var audio = LoadAudioAt16k();
-
-        // The real VAD and chunker, exactly as the recorder uses them.
-        var chunker = new SpeechChunker(AudioSourceKind.SystemAudio);
-        var chunks = new List<SpeechChunk>();
-        for (var offset = 0; offset < audio.Length; offset += 1600)
-        {
-            var length = Math.Min(1600, audio.Length - offset);
-            chunks.AddRange(chunker.Append(audio.AsSpan(offset, length)));
-        }
-
-        var tail = chunker.Flush();
-        if (tail is not null)
-        {
-            chunks.Add(tail);
-        }
-
-        _output.WriteLine($"VAD produced {chunks.Count} chunk(s) totalling {chunks.Sum(c => c.DurationSeconds):F2} s of speech.");
-        Assert.NotEmpty(chunks);
-
-        var spill = Path.Combine(Path.GetTempPath(), "mr-real-stt-" + Guid.NewGuid().ToString("N"));
-        var segments = new List<TranscriptSegment>();
+        // The whole path the application actually uses: the real windowing, the
+        // real decoding settings, the real engine, over a file on disk.
+        var directory = Path.Combine(Path.GetTempPath(), "mr-real-offline-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
 
         try
         {
-            using var scheduler = new SttScheduler(spill) { Language = Language };
-            scheduler.SegmentRecognized += segment =>
+            var working = Path.Combine(directory, RecognitionAudioNames.SystemAudio);
+            using (var writer = new WavFileWriter(working, SpeechConstants.SampleRate))
             {
-                lock (segments)
-                {
-                    segments.Add(segment);
-                }
-            };
-
-            scheduler.Start(new WhisperSpeechRecognizer(ModelPath!, "test-model", SpeechRecognitionOptions.Live(2, Language)));
-            foreach (var chunk in chunks)
-            {
-                scheduler.Enqueue(chunk);
+                writer.Write(LoadAudioAt16k());
+                writer.Flush();
             }
 
-            Assert.True(scheduler.DrainAndStop(TimeSpan.FromMinutes(10)), "the transcription queue did not drain");
+            var sources = RecognitionAudioNames.SourcesIn(directory);
+            Assert.Single(sources);
 
-            var status = scheduler.Status;
-            _output.WriteLine($"Processed {status.ProcessedChunks} chunk(s), failed {status.FailedChunks}, measured RTF {status.RealTimeFactor:F2}");
+            using var recognizer = new WhisperSpeechRecognizer(
+                ModelPath!, "test-model", SpeechRecognitionOptions.Offline(2, Language));
 
-            Assert.Equal(0, status.FailedChunks);
-            Assert.Equal(chunks.Count, (int)status.ProcessedChunks);
-            Assert.True(status.RealTimeFactor > 0, "no real-time factor was measured");
+            var stopwatch = Stopwatch.StartNew();
+            var segments = new OfflineTranscriptionService().Transcribe(sources, recognizer, Language);
+            stopwatch.Stop();
 
-            scheduler.CleanupSpillDirectory();
+            var text = string.Join(" ", segments.OrderBy(s => s.StartMs).Select(s => s.Text));
+            _output.WriteLine($"Transcript ({segments.Count} segment(s)) in {stopwatch.Elapsed.TotalSeconds:F2} s: {text}");
+
+            Assert.NotEmpty(segments);
+            Assert.False(string.IsNullOrWhiteSpace(text));
+
+            // The source stream is stamped by the file a window came from, never
+            // inferred from the audio.
+            Assert.All(segments, s => Assert.Equal(AudioSourceKind.SystemAudio, s.Source));
         }
         finally
         {
-            if (Directory.Exists(spill))
+            if (Directory.Exists(directory))
             {
-                Directory.Delete(spill, true);
+                Directory.Delete(directory, true);
             }
         }
-
-        var text = string.Join(" ", segments.OrderBy(s => s.StartMs).Select(s => s.Text));
-        _output.WriteLine($"Transcript ({segments.Count} segment(s)): {text}");
-
-        Assert.NotEmpty(segments);
-
-        // The source stream is stamped by the chunker, never inferred.
-        Assert.All(segments, s => Assert.Equal(AudioSourceKind.SystemAudio, s.Source));
     }
 
     private static string Normalize(string value)

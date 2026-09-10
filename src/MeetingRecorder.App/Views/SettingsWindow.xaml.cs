@@ -1,5 +1,6 @@
 using System.Windows;
 using MeetingRecorder.App.Services;
+using MeetingRecorder.Core.Benchmark;
 using MeetingRecorder.Core.Diagnostics;
 using MeetingRecorder.Core.Audio;
 using MeetingRecorder.Core.ModelManagement;
@@ -20,6 +21,10 @@ public partial class SettingsWindow : Window
         LoadDevices();
         LoadModels();
         LoadValues();
+
+        // Attached after the initial selection so that populating the combo does
+        // not fire it before the controls it writes to are ready.
+        ModelCombo.SelectionChanged += (_, _) => UpdateModelEstimateText();
     }
 
     private void LoadDevices()
@@ -76,7 +81,7 @@ public partial class SettingsWindow : Window
         ModelCombo.ItemsSource = ModelCatalog.SpeechModels.Select(BuildModelRow).ToList();
         LlmCombo.ItemsSource = ModelCatalog.TextGenerationModels.Select(BuildModelRow).ToList();
 
-        SelectModel(ModelCombo, ModelCatalog.SpeechModels, _services.Settings.Profile?.SttModelId ?? _services.Settings.SttModelId);
+        SelectModel(ModelCombo, ModelCatalog.SpeechModels, _services.Settings.SttModelId ?? _services.Settings.Profile?.SttModelId);
         SelectModel(LlmCombo, ModelCatalog.TextGenerationModels, _services.Settings.LlmModelId);
     }
 
@@ -112,12 +117,12 @@ public partial class SettingsWindow : Window
         MinutesCheck.IsChecked = settings.MinutesEnabled;
         SleepCheck.IsChecked = settings.PreventSleepWhileRecording;
         AutoSaveBox.Text = settings.AutoSaveIntervalSeconds.ToString();
-        RefineCheck.IsChecked = settings.RefineTranscriptAfterRecording;
-        DeleteRecognitionAudioCheck.IsChecked = settings.DeleteRecognitionAudioAfterRefinement;
+        KeepRecognitionAudioCheck.IsChecked = settings.KeepRecognitionAudio;
+        DeleteRecognitionAudioCheck.IsChecked = settings.DeleteRecognitionAudioAfterTranscription;
         AutoSaveRecordingCheck.IsChecked = settings.AutoSaveRecordings;
         MicMutedCheck.IsChecked = settings.MicrophoneMuted;
         SystemMutedCheck.IsChecked = settings.SystemAudioMuted;
-        UpdateRefinementModelText();
+        UpdateModelEstimateText();
 
         var mp3 = _services.Transcoder.IsFormatSupported(RecordingFormat.Mp3);
         Mp3AvailabilityText.Text = mp3
@@ -135,17 +140,20 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>
-    /// Says which model the second pass would actually use, so the checkbox is
-    /// not a promise the machine cannot keep.
+    /// Says what the selected model will cost in waiting, so a choice that ties
+    /// the machine up for an afternoon is made deliberately.
     /// </summary>
-    private void UpdateRefinementModelText()
+    /// <remarks>
+    /// The figure is an estimate scaled from the measured CPU score, and it is
+    /// labelled as one. It is not presented as a measurement of this machine
+    /// transcribing this model, because it is not.
+    /// </remarks>
+    private void UpdateModelEstimateText()
     {
-        var descriptor = _services.RefinementModel();
+        var descriptor = SelectedDescriptor(ModelCombo, ModelCatalog.SpeechModels);
         if (descriptor is null)
         {
-            RefinementModelText.Text =
-                "このPCの性能では、速報より高精度なモデルを選べません。"
-                + "「PC性能を測定して自動設定」を実行すると再判定します。";
+            ModelEstimateText.Text = string.Empty;
             return;
         }
 
@@ -153,7 +161,27 @@ public partial class SettingsWindow : Window
             ? "取得済み"
             : $"未取得（{descriptor.SizeDisplay} のダウンロードが必要）";
 
-        RefinementModelText.Text = $"やり直しに使うモデル: {descriptor.DisplayName} — {present}";
+        var profile = _services.Settings.Profile;
+        if (profile is null || profile.CpuScore <= 0)
+        {
+            ModelEstimateText.Text =
+                $"{descriptor.DisplayName} — {present}。"
+                + "「PC性能を測定して自動設定」を実行すると、このPCでのおおよその処理時間を表示します。";
+            return;
+        }
+
+        var capability = new MachineCapability(
+            profile.LogicalCores, profile.TotalRamGb, profile.CpuScore, profile.CpuScore, 0);
+        var factor = ProfileSelector.EstimateProcessingFactor(descriptor, capability);
+        var fits = ProfileSelector.FitsInMemory(descriptor, capability);
+
+        var memory = fits
+            ? string.Empty
+            : $" このPCのRAM（{profile.TotalRamGb:F0}GB）では動作が不安定になる可能性があります。";
+
+        ModelEstimateText.Text =
+            $"{descriptor.DisplayName} — {present} / 推定処理時間: 音声長の約 {factor:F1} 倍"
+            + $"（1時間の録音でおよそ {TimeSpan.FromHours(factor):h\時\間mm\分}。実測値ではなく推定です）。{memory}";
     }
 
     private void UpdateProfileText()
@@ -161,7 +189,7 @@ public partial class SettingsWindow : Window
         var profile = _services.Settings.Profile;
         ProfileText.Text = profile is null
             ? "PC性能はまだ測定されていません。「PC性能を測定して自動設定」を押すと、この端末の実測値からモデル・スレッド数・話者分離の可否を自動選択します。"
-            : $"自動設定: {profile.Rationale}\nスレッド数 {profile.SttThreads} / チャンク {profile.ChunkSeconds:F0} 秒 / "
+            : $"自動設定: {profile.Rationale}\nスレッド数 {profile.SttThreads} / "
               + $"話者分離 {(profile.DiarizationEnabled ? "有効" : "無効")} / 測定日時 {profile.MeasuredAtUtc.ToLocalTime():yyyy-MM-dd HH:mm}";
     }
 
@@ -202,6 +230,7 @@ public partial class SettingsWindow : Window
         {
             StatusText.Text = $"「{descriptor.DisplayName}」を取得しました。";
             LoadModels();
+            UpdateModelEstimateText();
         }
     }
 
@@ -250,6 +279,7 @@ public partial class SettingsWindow : Window
             UpdateProfileText();
             LoadModels();
             SelectModel(ModelCombo, ModelCatalog.SpeechModels, profile.SttModelId);
+            UpdateModelEstimateText();
             StatusText.Text = "測定が完了し、設定を更新しました。";
         }
         catch (Exception ex)
@@ -297,8 +327,8 @@ public partial class SettingsWindow : Window
         settings.DiarizationEnabled = DiarizationCheck.IsChecked == true;
         settings.MinutesEnabled = MinutesCheck.IsChecked == true;
         settings.PreventSleepWhileRecording = SleepCheck.IsChecked == true;
-        settings.RefineTranscriptAfterRecording = RefineCheck.IsChecked == true;
-        settings.DeleteRecognitionAudioAfterRefinement = DeleteRecognitionAudioCheck.IsChecked == true;
+        settings.KeepRecognitionAudio = KeepRecognitionAudioCheck.IsChecked == true;
+        settings.DeleteRecognitionAudioAfterTranscription = DeleteRecognitionAudioCheck.IsChecked == true;
         settings.AutoSaveRecordings = AutoSaveRecordingCheck.IsChecked == true;
         settings.MicrophoneMuted = MicMutedCheck.IsChecked == true;
         settings.SystemAudioMuted = SystemMutedCheck.IsChecked == true;
