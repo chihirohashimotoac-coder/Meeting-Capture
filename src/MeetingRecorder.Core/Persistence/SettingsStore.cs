@@ -102,6 +102,9 @@ public sealed class SettingsStore
     /// the next save writes the current shape.
     /// </para>
     /// </remarks>
+    /// <summary>The MP3 bitrate that was hard-wired before it became a setting.</summary>
+    private const int LegacyMp3BitrateKbps = 96;
+
     internal static void Migrate(AppSettings settings, string json, ILogger logger)
     {
         JsonNode? node;
@@ -143,6 +146,21 @@ public sealed class SettingsStore
             && TryGetString(profile, "refinementModelId") is { Length: > 0 } profileModel)
         {
             settings.Profile.SttModelId = profileModel;
+        }
+
+        // 96 kbps was the MP3 default before the bitrate was something a user
+        // could choose, so a file holding it is holding a default rather than a
+        // decision, and it is raised to the new one. A file holding anything
+        // else was edited deliberately and is left alone.
+        if (root["mp3BitrateKbps"] is JsonValue bitrateNode
+            && bitrateNode.TryGetValue<int>(out var storedBitrate)
+            && storedBitrate == LegacyMp3BitrateKbps)
+        {
+            settings.Mp3BitrateKbps = new AppSettings().Mp3BitrateKbps;
+            logger.Info(
+                nameof(SettingsStore),
+                $"MP3 bitrate raised from the old default of {LegacyMp3BitrateKbps} kbps "
+                + $"to {settings.Mp3BitrateKbps} kbps.");
         }
 
         // The DSP settings from before this change describe stages that do not

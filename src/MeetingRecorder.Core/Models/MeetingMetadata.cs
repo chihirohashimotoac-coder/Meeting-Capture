@@ -26,6 +26,16 @@ public sealed class MeetingMetadata
 
     public RecordingFormat Format { get; set; } = RecordingFormat.Wav;
 
+    /// <summary>
+    /// Bitrate of the MP3, in kbps, or null when the meeting was kept as WAV.
+    /// </summary>
+    /// <remarks>
+    /// The rate the encoder actually produced. It is recorded because the
+    /// requested rate is only a request: an encoder publishes a fixed set of
+    /// output formats and the nearest is used.
+    /// </remarks>
+    public int? Mp3BitrateKbps { get; set; }
+
     public int SampleRate { get; set; } = 48000;
 
     public int Channels { get; set; } = 1;

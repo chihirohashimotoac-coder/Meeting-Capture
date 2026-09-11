@@ -147,6 +147,29 @@ public sealed class SettingsMigrationTests : IDisposable
         Assert.Equal(-6.0206, settings.Processing.MixGainPerStreamDb, 4);
     }
 
+    /// <summary>
+    /// 96 kbps was never something a user could pick - it was the hard-wired
+    /// default - so a file carrying it is carrying a default, not a decision.
+    /// </summary>
+    [Fact]
+    public void TheOldHardWiredMp3BitrateIsRaisedToTheNewDefault()
+    {
+        var settings = LoadLegacy();
+
+        Assert.Equal(192, settings.Mp3BitrateKbps);
+        Assert.Equal(192, new AppSettings().Mp3BitrateKbps);
+    }
+
+    /// <summary>A bitrate that was edited by hand is a decision, and it stands.</summary>
+    [Fact]
+    public void ABitrateTheUserChoseIsLeftAlone()
+    {
+        var settings = LoadLegacy(
+            LegacySettings.Replace("\"mp3BitrateKbps\": 96", "\"mp3BitrateKbps\": 320"));
+
+        Assert.Equal(320, settings.Mp3BitrateKbps);
+    }
+
     [Fact]
     public void SavingAfterAMigrationWritesTheCurrentShapeAndReadsBackTheSame()
     {

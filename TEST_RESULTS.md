@@ -154,6 +154,10 @@ commit `f7232d4`）。
 
 | Test | Environment | Result | Notes |
 | --- | --- | --- | --- |
+| **MP3 の実ビットレートを記録する** | Ubuntu / GitHub Actions | PASS | 要求と異なる値で符号化された場合に `metadata.json` へ実値を記録し、警告を出す |
+| 要求どおり符号化できたら警告を出さない | Ubuntu / GitHub Actions | PASS | |
+| 旧既定の 96 kbps を 192 kbps へ引き上げる | Ubuntu / GitHub Actions | PASS | 96 は UI から選べなかったため「既定値」であって「選択」ではない |
+| 手動で設定した値は変更しない | Ubuntu / GitHub Actions | PASS | 320 kbps はそのまま |
 | WAV ラウンドトリップ（16bit量子化のみの誤差） | GitHub Actions / windows-latest | PASS | |
 | フラッシュ後のヘッダが正しい（強制終了模擬） | GitHub Actions / windows-latest | PASS | 未 Dispose のまま読み出し |
 | データチャンク切断時も読める | GitHub Actions / windows-latest | PASS | 電源断模擬 |
