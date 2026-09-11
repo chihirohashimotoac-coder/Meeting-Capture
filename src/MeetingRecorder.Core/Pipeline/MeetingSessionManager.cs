@@ -293,10 +293,22 @@ public sealed class MeetingSessionManager : IDisposable
         try
         {
             var mp3Path = _folder!.Mp3Path;
-            _transcoder.Transcode(wavPath, mp3Path, RecordingFormat.Mp3, _settings!.Mp3BitrateKbps);
+            var requested = _settings!.Mp3BitrateKbps;
+            var encoded = _transcoder.Transcode(wavPath, mp3Path, RecordingFormat.Mp3, requested);
 
             if (File.Exists(mp3Path) && new FileInfo(mp3Path).Length > 0)
             {
+                // What the file actually is, not what was asked for: the encoder
+                // offers a fixed set of rates and takes the nearest.
+                _metadata!.Mp3BitrateKbps = encoded.BitrateKbps;
+
+                if (encoded.BitrateKbps > 0 && encoded.BitrateKbps != requested)
+                {
+                    warnings.Add(
+                        $"この環境のMP3エンコーダーは {requested} kbps に対応していないため、"
+                        + $"{encoded.BitrateKbps} kbps で保存しました。");
+                }
+
                 // Only now is it safe to remove the WAV: the deliverable exists.
                 File.Delete(wavPath);
                 return mp3Path;

@@ -15,7 +15,7 @@ public sealed class AppSettings
     /// that changed meaning and ignores the ones that no longer exist, so an
     /// upgrade keeps the user's choices instead of resetting them.
     /// </summary>
-    public const int CurrentVersion = 2;
+    public const int CurrentVersion = 3;
 
     public int Version { get; set; } = CurrentVersion;
 
@@ -55,14 +55,60 @@ public sealed class AppSettings
     /// <summary>Root folder that receives one sub-folder per meeting.</summary>
     public string? SaveRoot { get; set; }
 
-    public RecordingFormat Format { get; set; } = RecordingFormat.Wav;
+    /// <summary>
+    /// Format the finished meeting audio is stored in.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// MP3 by default, at <see cref="Mp3BitrateKbps"/>. A meeting recorder that
+    /// fills a drive quietly is a meeting recorder people stop using, and WAV
+    /// costs about four times as much per hour for audio that is going to be
+    /// listened back to and transcribed, not mastered.
+    /// </para>
+    /// <para>
+    /// Nothing about transcription depends on this. Whisper reads the per-stream
+    /// 16 kHz working audio, which is always PCM and is written straight from the
+    /// capture; the meeting file is for people. Anyone who wants the untouched
+    /// waveform can choose WAV, and an environment with no MP3 encoder falls back
+    /// to it automatically and says so.
+    /// </para>
+    /// </remarks>
+    public RecordingFormat Format { get; set; } = RecordingFormat.Mp3;
 
     /// <summary>
     /// MP3 bitrate in kbps. 96 kbps mono/joint-stereo at 16 kHz-48 kHz is the
     /// documented default: speech stays clearly intelligible while an hour of
     /// meeting costs ~43 MB. See docs/ARCHITECTURE.md "Recording format".
     /// </summary>
-    public int Mp3BitrateKbps { get; set; } = 96;
+    /// <summary>
+    /// Bitrate for the MP3 conversion, in kbps.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 192 kbps for a mono meeting recording is generous - MPEG-1 Layer III at
+    /// this rate on one channel is transparent for speech by a wide margin. It
+    /// is the default because the file is an archive of something that happened
+    /// once: 86 MB an hour instead of 43 is a trade almost every user would take
+    /// to never wonder whether the codec ate a word.
+    /// </para>
+    /// <para>
+    /// The encoder offers a fixed set of output formats and the nearest one to
+    /// this value is used, so the bitrate actually achieved is recorded in the
+    /// meeting's metadata rather than assumed from this setting.
+    /// </para>
+    /// </remarks>
+    public int Mp3BitrateKbps { get; set; } = 192;
+
+    /// <summary>
+    /// The bitrates the settings window offers, in kbps.
+    /// </summary>
+    /// <remarks>
+    /// MPEG-1 Layer III rates only, so nothing here has to be rounded to
+    /// something else by the encoder. Below 128 the point of choosing MP3 at all
+    /// is size, and above 256 the file stops being meaningfully smaller than the
+    /// WAV it came from.
+    /// </remarks>
+    public static IReadOnlyList<int> Mp3Bitrates { get; } = new[] { 128, 160, 192, 256, 320 };
 
     // ---- Audio processing ------------------------------------------------
 

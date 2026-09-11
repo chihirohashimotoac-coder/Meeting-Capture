@@ -58,11 +58,20 @@
                         </Grid>
 
                         <TextBlock Text="録音形式" Style="{StaticResource SectionHeader}" />
-                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                            <RadioButton x:Name="WavRadio" Content="WAV（48kHz/16bit/モノラル・約338MB/時）"
-                                         GroupName="Format" VerticalAlignment="Center" Margin="0,0,24,0" />
-                            <RadioButton x:Name="Mp3Radio" Content="MP3（96kbps・約43MB/時）"
-                                         GroupName="Format" VerticalAlignment="Center" />
+                        <StackPanel Margin="0,0,0,8">
+                            <RadioButton x:Name="WavRadio"
+                                         Content="WAV — 無圧縮。48kHz / 16bit / モノラル・約346MB/時"
+                                         GroupName="Format" Margin="0,0,0,8" Checked="OnFormatChanged" />
+                            <RadioButton x:Name="Mp3Radio"
+                                         Content="MP3 — 圧縮。ファイルは小さくなります"
+                                         GroupName="Format" Checked="OnFormatChanged" />
+                            <StackPanel Orientation="Horizontal" Margin="28,8,0,0">
+                                <TextBlock Text="ビットレート" VerticalAlignment="Center" Margin="0,0,10,0" />
+                                <ComboBox x:Name="Mp3BitrateCombo" Width="150"
+                                          SelectionChanged="OnMp3BitrateChanged" />
+                            </StackPanel>
+                            <TextBlock x:Name="Mp3SizeText" Style="{StaticResource CaptionText}"
+                                       Margin="28,6,0,0" />
                         </StackPanel>
                         <TextBlock x:Name="Mp3AvailabilityText" Style="{StaticResource CaptionText}" />
                     </StackPanel>

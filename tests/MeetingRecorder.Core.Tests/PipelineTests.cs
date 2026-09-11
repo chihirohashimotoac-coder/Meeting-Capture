@@ -39,6 +39,11 @@ public sealed class PipelineTests : IDisposable
         SttEnabled = true,
         KeepRecognitionAudio = true,
         AutoSaveIntervalSeconds = 5,
+
+        // Stated rather than inherited: the product default is MP3, and these
+        // tests run without a transcoder, so leaving it unset would quietly turn
+        // every one of them into a test of the no-encoder fallback path.
+        Format = RecordingFormat.Wav,
     };
 
     private static RecordingPipelineOptions Options() => new();
@@ -630,6 +635,49 @@ public sealed class PipelineTests : IDisposable
     }
 
     [Fact]
+    public void TheBitrateRecordedIsTheOneTheEncoderActuallyProduced()
+    {
+        // An encoder publishes a fixed set of output formats, so a request for
+        // 192 kbps can come back as something else. Writing the requested figure
+        // into metadata would make the file describe itself incorrectly, and the
+        // user would have no way to know.
+        var factory = new FakeCaptureFactory();
+        using var manager = new MeetingSessionManager(factory, new FixedRateTranscoder(160));
+
+        var settings = CreateSettings();
+        settings.SttEnabled = false;
+        settings.Format = RecordingFormat.Mp3;
+        settings.Mp3BitrateKbps = 192;
+
+        manager.Start(settings, "Bitrate");
+        Thread.Sleep(900);
+        var summary = manager.Stop();
+
+        Assert.Equal(RecordingFormat.Mp3, summary.Metadata.Format);
+        Assert.Equal(160, summary.Metadata.Mp3BitrateKbps);
+        Assert.Contains(summary.Warnings, w => w.Contains("160 kbps", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AnEncoderThatHonoursTheRequestSaysNothing()
+    {
+        var factory = new FakeCaptureFactory();
+        using var manager = new MeetingSessionManager(factory, new FixedRateTranscoder(192));
+
+        var settings = CreateSettings();
+        settings.SttEnabled = false;
+        settings.Format = RecordingFormat.Mp3;
+        settings.Mp3BitrateKbps = 192;
+
+        manager.Start(settings, "Bitrate-ok");
+        Thread.Sleep(900);
+        var summary = manager.Stop();
+
+        Assert.Equal(192, summary.Metadata.Mp3BitrateKbps);
+        Assert.DoesNotContain(summary.Warnings, w => w.Contains("kbps", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void EditsMadeAfterStopAreWrittenBackToTheTranscriptFiles()
     {
         var factory = new FakeCaptureFactory();
@@ -682,8 +730,26 @@ public sealed class PipelineTests : IDisposable
     {
         public bool IsFormatSupported(RecordingFormat format) => format == RecordingFormat.Wav;
 
-        public string Transcode(string sourceWavPath, string destinationPath, RecordingFormat format, int bitrateKbps)
+        public TranscodeResult Transcode(string sourceWavPath, string destinationPath, RecordingFormat format, int bitrateKbps)
             => throw new NotSupportedException("no encoder");
+    }
+
+    /// <summary>An encoder that always produces one particular bitrate.</summary>
+    private sealed class FixedRateTranscoder : IAudioTranscoder
+    {
+        private readonly int _actualKbps;
+
+        public FixedRateTranscoder(int actualKbps) => _actualKbps = actualKbps;
+
+        public bool IsFormatSupported(RecordingFormat format) => true;
+
+        public TranscodeResult Transcode(string sourceWavPath, string destinationPath, RecordingFormat format, int bitrateKbps)
+        {
+            // Stands in for the encoder without pulling Media Foundation into a
+            // Linux test run: the bytes do not matter here, the reported rate does.
+            File.Copy(sourceWavPath, destinationPath, overwrite: true);
+            return new TranscodeResult(destinationPath, _actualKbps);
+        }
     }
 }
 

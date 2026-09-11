@@ -6,6 +6,7 @@ using MeetingRecorder.Core.Audio;
 using MeetingRecorder.Core.ModelManagement;
 using MeetingRecorder.Core.Models;
 using MeetingRecorder.Core.Persistence;
+using MeetingRecorder.Core.Pipeline;
 
 namespace MeetingRecorder.App.Views;
 
@@ -25,6 +26,14 @@ public partial class SettingsWindow : Window
         // Attached after the initial selection so that populating the combo does
         // not fire it before the controls it writes to are ready.
         ModelCombo.SelectionChanged += (_, _) => UpdateModelEstimateText();
+
+        // The per-hour cost depends on the working-audio choices as much as on
+        // the format, so it is refreshed whenever any of them moves.
+        foreach (var box in new[] { SttEnabledCheck, KeepRecognitionAudioCheck, DeleteRecognitionAudioCheck })
+        {
+            box.Checked += (_, _) => UpdateMp3Controls();
+            box.Unchecked += (_, _) => UpdateMp3Controls();
+        }
     }
 
     private void LoadDevices()
@@ -104,6 +113,61 @@ public partial class SettingsWindow : Window
         combo.SelectedIndex = models.Count > 0 ? 0 : -1;
     }
 
+    /// <summary>The bitrate currently chosen in the drop-down, in kbps.</summary>
+    private int SelectedMp3Bitrate()
+    {
+        var index = Mp3BitrateCombo.SelectedIndex;
+        return index >= 0 && index < AppSettings.Mp3Bitrates.Count
+            ? AppSettings.Mp3Bitrates[index]
+            : new AppSettings().Mp3BitrateKbps;
+    }
+
+    private void OnFormatChanged(object sender, RoutedEventArgs e) => UpdateMp3Controls();
+
+    private void OnMp3BitrateChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e) => UpdateMp3Controls();
+
+    /// <summary>
+    /// Keeps the bitrate control relevant, and says what the current choices
+    /// actually cost per hour.
+    /// </summary>
+    /// <remarks>
+    /// The size is shown here rather than left to the user to work out, because
+    /// the thing that fills a drive is never the setting somebody thought about -
+    /// it is the one they never saw.
+    /// </remarks>
+    private void UpdateMp3Controls()
+    {
+        if (Mp3BitrateCombo is null || Mp3SizeText is null)
+        {
+            return;
+        }
+
+        var isMp3 = Mp3Radio.IsChecked == true;
+        Mp3BitrateCombo.IsEnabled = isMp3 && Mp3Radio.IsEnabled;
+
+        var kbps = SelectedMp3Bitrate();
+        var preview = PendingFootprintSettings(isMp3, kbps);
+
+        var note = isMp3
+            ? $"モノラル {kbps} kbps は、1チャンネルあたりではステレオ {kbps * 2} kbps 相当の割り当てです。"
+            : "無圧縮のため、元の波形がそのまま残ります。";
+
+        Mp3SizeText.Text = RecordingFootprint.Describe(preview) + " " + note;
+    }
+
+    /// <summary>
+    /// The settings as the window currently shows them, for costing purposes.
+    /// Not saved; the user may still cancel.
+    /// </summary>
+    private AppSettings PendingFootprintSettings(bool isMp3, int kbps) => new()
+    {
+        Format = isMp3 ? RecordingFormat.Mp3 : RecordingFormat.Wav,
+        Mp3BitrateKbps = kbps,
+        SttEnabled = SttEnabledCheck?.IsChecked == true,
+        KeepRecognitionAudio = KeepRecognitionAudioCheck?.IsChecked == true,
+        DeleteRecognitionAudioAfterTranscription = DeleteRecognitionAudioCheck?.IsChecked == true,
+    };
+
     private void LoadValues()
     {
         var settings = _services.Settings;
@@ -124,11 +188,28 @@ public partial class SettingsWindow : Window
         SystemMutedCheck.IsChecked = settings.SystemAudioMuted;
         UpdateModelEstimateText();
 
+        Mp3BitrateCombo.ItemsSource = AppSettings.Mp3Bitrates.Select(k => $"{k} kbps").ToList();
+        var bitrateIndex = AppSettings.Mp3Bitrates
+            .Select((k, i) => (Kbps: k, Index: i))
+            .OrderBy(x => Math.Abs(x.Kbps - settings.Mp3BitrateKbps))
+            .First().Index;
+        Mp3BitrateCombo.SelectedIndex = bitrateIndex;
+
         var mp3 = _services.Transcoder.IsFormatSupported(RecordingFormat.Mp3);
         Mp3AvailabilityText.Text = mp3
             ? "MP3エンコーダー: Windows標準のMedia Foundationを使用します（追加インストール不要）。"
             : "MP3エンコーダーが見つかりません（Windows N/KNエディションなど）。MP3を選んでもWAVで保存されます。";
         Mp3Radio.IsEnabled = mp3;
+
+        // MP3 is the default, so on a system without the encoder the window
+        // would otherwise open showing a disabled radio as the chosen format.
+        if (!mp3)
+        {
+            Mp3Radio.IsChecked = false;
+            WavRadio.IsChecked = true;
+        }
+
+        UpdateMp3Controls();
 
         UpdateProfileText();
 
@@ -331,6 +412,7 @@ public partial class SettingsWindow : Window
 
         settings.SaveRoot = saveRoot;
         settings.Format = Mp3Radio.IsChecked == true ? RecordingFormat.Mp3 : RecordingFormat.Wav;
+        settings.Mp3BitrateKbps = SelectedMp3Bitrate();
         settings.SttEnabled = SttEnabledCheck.IsChecked == true;
         settings.DiarizationEnabled = DiarizationCheck.IsChecked == true;
         settings.MinutesEnabled = MinutesCheck.IsChecked == true;

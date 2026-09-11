@@ -21,6 +21,13 @@ namespace MeetingRecorder.Audio;
 /// recording stays as WAV and the user is told, rather than the conversion
 /// failing silently.</para>
 ///
+/// <para><b>192 kbps, mono.</b> The rate is per channel, so mono at 192 kbps is
+/// the allocation stereo gets at 384 - far past transparent for speech. It is the
+/// default because the file is an archive of something that happened once, and
+/// 86 MB an hour instead of 43 is a trade almost anybody would take to never
+/// wonder whether the codec ate a word. Anyone who does not want a lossy file at
+/// all has WAV, which is what the application records by default.</para>
+///
 /// <para><b>Why transcode after the fact instead of encoding live.</b> The
 /// recording must survive a crash at any moment. A WAV with a self-healing
 /// header does; a half-written MP3 frame stream is far more fragile. So the
@@ -28,10 +35,11 @@ namespace MeetingRecorder.Audio;
 /// safely closed - and the WAV is deleted only after the MP3 exists and is
 /// non-empty.</para>
 ///
-/// <para><b>96 kbps.</b> Mono speech at 96 kbps is transparent for meeting
-/// purposes, costs ~43 MB per hour against ~338 MB for 48 kHz 16-bit WAV, and
-/// stays well above the bitrate where MP3 pre-echo starts to smear consonants
-/// in a way that hurts later re-transcription.</para>
+/// <para><b>The bitrate is a request, not an instruction.</b> An MFT publishes a
+/// fixed list of output media types and the encoder is given one of them; asking
+/// for a rate that is not on the list gets the nearest one that is. So this class
+/// picks the media type itself and reports the rate it actually got, and the
+/// caller records that rather than what was asked for.</para>
 /// </remarks>
 [SupportedOSPlatform("windows")]
 public sealed class MediaFoundationTranscoder : IAudioTranscoder
@@ -52,11 +60,11 @@ public sealed class MediaFoundationTranscoder : IAudioTranscoder
         _ => false,
     };
 
-    public string Transcode(string sourceWavPath, string destinationPath, RecordingFormat format, int bitrateKbps)
+    public TranscodeResult Transcode(string sourceWavPath, string destinationPath, RecordingFormat format, int bitrateKbps)
     {
         if (format == RecordingFormat.Wav)
         {
-            return sourceWavPath;
+            return new TranscodeResult(sourceWavPath, 0);
         }
 
         if (format != RecordingFormat.Mp3)
@@ -75,9 +83,40 @@ public sealed class MediaFoundationTranscoder : IAudioTranscoder
         try
         {
             using var reader = new AudioFileReader(sourceWavPath);
-            MediaFoundationEncoder.EncodeToMp3(reader, destinationPath, bitrateKbps * 1000);
-            _logger.Info(nameof(MediaFoundationTranscoder), $"Encoded MP3 at {bitrateKbps} kbps -> {destinationPath}");
-            return destinationPath;
+
+            // Choose the output type here rather than letting the convenience
+            // overload do it, so the rate that was actually selected can be
+            // reported instead of guessed.
+            var mediaType = MediaFoundationEncoder.SelectMediaType(
+                AudioSubtypes.MFAudioFormat_MP3, reader.WaveFormat, bitrateKbps * 1000);
+
+            if (mediaType is null)
+            {
+                throw new NotSupportedException(
+                    $"この環境のMP3エンコーダーは {reader.WaveFormat.SampleRate} Hz / "
+                    + $"{reader.WaveFormat.Channels} ch を出力できません。");
+            }
+
+            var actualKbps = (int)Math.Round(mediaType.AverageBytesPerSecond * 8 / 1000.0);
+
+            using (var encoder = new MediaFoundationEncoder(mediaType))
+            {
+                encoder.Encode(destinationPath, reader);
+            }
+
+            if (actualKbps != bitrateKbps)
+            {
+                _logger.Warn(
+                    nameof(MediaFoundationTranscoder),
+                    $"{bitrateKbps} kbps is not offered by this system's MP3 encoder; used {actualKbps} kbps instead.");
+            }
+
+            _logger.Info(
+                nameof(MediaFoundationTranscoder),
+                $"Encoded MP3 at {actualKbps} kbps ({reader.WaveFormat.SampleRate} Hz, "
+                + $"{reader.WaveFormat.Channels} ch) -> {destinationPath}");
+
+            return new TranscodeResult(destinationPath, actualKbps);
         }
         finally
         {

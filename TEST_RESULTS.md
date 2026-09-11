@@ -139,6 +139,9 @@ commit `f7232d4`）。
 
 | Test | Environment | Result | Notes |
 | --- | --- | --- | --- |
+| **バースト配信でも録音が途切れない** | Ubuntu / GitHub Actions | PASS | 実機と同じ100ms単位のバースト配信＋遅延。**挿入無音 0 ms・欠落 0 箇所**（修正前は 3.3 秒中 323 ms が無音、100ms窓23個中2個が破損） |
+| マイクが痩せたら警告する | Ubuntu / GitHub Actions | PASS | クロック 0.66 倍のマイクで 24% の挿入無音を検出し報告 |
+| 正常な録音では警告を出さない | Ubuntu / GitHub Actions | PASS | 停止時にリングを空にする処理を欠落と誤認しない |
 | リングバッファの順序保持とラップ | GitHub Actions / windows-latest | PASS | |
 | コンシューマ停止時に最古を破棄しカウント | GitHub Actions / windows-latest | PASS | オーバーラン計上 |
 | ドリフト補正が通常時に発動しない | GitHub Actions / windows-latest | PASS | |
@@ -151,6 +154,14 @@ commit `f7232d4`）。
 
 | Test | Environment | Result | Notes |
 | --- | --- | --- | --- |
+| **既定の保存形式が MP3 192 kbps** | Ubuntu / GitHub Actions | PASS | 1時間あたり 346MB → 86MB |
+| **空き容量の見積もりが全書き込みを数える** | Ubuntu / GitHub Actions | PASS | 96,000 + 2×32,000 = 160,000 B/s。**修正前は meeting.wav の分しか数えず 1.67 倍の時間を表示** |
+| MP3 でも録音中の必要容量は減らない | Ubuntu / GitHub Actions | PASS | 常に WAV で書いてから変換するため |
+| 文字起こし後の残量 | Ubuntu / GitHub Actions | PASS | 削除設定 ON で音声のみ／OFF で作業音声も残る |
+| **MP3 の実ビットレートを記録する** | Ubuntu / GitHub Actions | PASS | 要求と異なる値で符号化された場合に `metadata.json` へ実値を記録し、警告を出す |
+| 要求どおり符号化できたら警告を出さない | Ubuntu / GitHub Actions | PASS | |
+| 旧既定の 96 kbps を 192 kbps へ引き上げる | Ubuntu / GitHub Actions | PASS | 96 は UI から選べなかったため「既定値」であって「選択」ではない |
+| 手動で設定した値は変更しない | Ubuntu / GitHub Actions | PASS | 320 kbps はそのまま |
 | WAV ラウンドトリップ（16bit量子化のみの誤差） | GitHub Actions / windows-latest | PASS | |
 | フラッシュ後のヘッダが正しい（強制終了模擬） | GitHub Actions / windows-latest | PASS | 未 Dispose のまま読み出し |
 | データチャンク切断時も読める | GitHub Actions / windows-latest | PASS | 電源断模擬 |

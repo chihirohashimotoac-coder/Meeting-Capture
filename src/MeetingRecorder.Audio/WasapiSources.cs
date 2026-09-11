@@ -53,9 +53,17 @@ public sealed class WasapiMicrophoneCaptureSource : WasapiCaptureSource
 
     protected override IWaveIn CreateCapture(MMDevice device)
     {
-        // 20 ms buffers: short enough that the meters feel live, long enough that
-        // the callback rate stays modest on a low-power laptop.
-        return new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: 20);
+        // 100 ms, not the 20 ms this used to ask for. WASAPI does not wait for a
+        // late client: when the capture buffer fills before the callback has
+        // drained it, Windows overwrites the oldest audio and the words in it are
+        // gone. A 20 ms buffer gives a managed callback 20 ms to be scheduled,
+        // which on a laptop that is also running a conference client is not a
+        // safe assumption.
+        //
+        // Nothing downstream wants the shorter buffer: the pipeline has a 30
+        // second ring of its own, the level meters are updated from the same
+        // callback either way, and the recording is not being monitored live.
+        return new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: 100);
     }
 }
 

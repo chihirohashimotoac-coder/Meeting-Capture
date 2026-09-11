@@ -103,13 +103,22 @@ public interface IAudioFileWriter : IDisposable
 }
 
 /// <summary>Transcodes the crash-safe WAV into the user's chosen delivery format.</summary>
+/// <param name="Path">The file that was produced.</param>
+/// <param name="BitrateKbps">
+/// The bitrate actually used, which is not always the one that was asked for:
+/// an encoder offers a fixed set of output formats and the nearest one is taken.
+/// Reported so the application can say what it did rather than what it intended.
+/// </param>
+public readonly record struct TranscodeResult(string Path, int BitrateKbps);
+
 public interface IAudioTranscoder
 {
     bool IsFormatSupported(RecordingFormat format);
 
     /// <summary>
-    /// Converts <paramref name="sourceWavPath"/> and returns the produced path.
+    /// Converts <paramref name="sourceWavPath"/> and returns the produced path
+    /// together with the bitrate that was actually achieved.
     /// Implementations must not delete the source; the caller decides.
     /// </summary>
-    string Transcode(string sourceWavPath, string destinationPath, RecordingFormat format, int bitrateKbps);
+    TranscodeResult Transcode(string sourceWavPath, string destinationPath, RecordingFormat format, int bitrateKbps);
 }
