@@ -55,7 +55,25 @@ public sealed class AppSettings
     /// <summary>Root folder that receives one sub-folder per meeting.</summary>
     public string? SaveRoot { get; set; }
 
-    public RecordingFormat Format { get; set; } = RecordingFormat.Wav;
+    /// <summary>
+    /// Format the finished meeting audio is stored in.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// MP3 by default, at <see cref="Mp3BitrateKbps"/>. A meeting recorder that
+    /// fills a drive quietly is a meeting recorder people stop using, and WAV
+    /// costs about four times as much per hour for audio that is going to be
+    /// listened back to and transcribed, not mastered.
+    /// </para>
+    /// <para>
+    /// Nothing about transcription depends on this. Whisper reads the per-stream
+    /// 16 kHz working audio, which is always PCM and is written straight from the
+    /// capture; the meeting file is for people. Anyone who wants the untouched
+    /// waveform can choose WAV, and an environment with no MP3 encoder falls back
+    /// to it automatically and says so.
+    /// </para>
+    /// </remarks>
+    public RecordingFormat Format { get; set; } = RecordingFormat.Mp3;
 
     /// <summary>
     /// MP3 bitrate in kbps. 96 kbps mono/joint-stereo at 16 kHz-48 kHz is the

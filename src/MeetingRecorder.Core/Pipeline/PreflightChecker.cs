@@ -151,7 +151,7 @@ public sealed class PreflightChecker
                 "空き容量",
                 "保存先が未設定のため確認できません。",
                 "設定画面で保存先フォルダーを選択すると空き容量を確認できます。"
-                + "WAVは1時間あたり約338MB、MP3(96kbps)は約43MBを使用します。");
+                + RecordingFootprint.Describe(settings));
         }
 
         try
@@ -164,7 +164,12 @@ public sealed class PreflightChecker
 
             var drive = new DriveInfo(root);
             var free = drive.AvailableFreeSpace;
-            var hours = free / (48000.0 * 2.0) / 3600.0;
+
+            // Everything the recording writes, not just the meeting file: the
+            // per-stream working audio is another 64 kB/s while it is enabled,
+            // and quoting the meeting file alone promised 1.67x the hours the
+            // drive could actually take.
+            var hours = RecordingFootprint.HoursThatFit(settings, free);
 
             if (free < MinimumFreeBytes)
             {
@@ -174,7 +179,7 @@ public sealed class PreflightChecker
                     "空き容量",
                     $"空き容量が不足しています ({free / 1024.0 / 1024.0:F0} MB)。",
                     "不要なファイルを削除するか、別のドライブを保存先に指定してください。"
-                    + "WAVは1時間あたり約338MB、MP3(96kbps)は約43MBを使用します。");
+                    + RecordingFootprint.Describe(settings));
             }
 
             if (free < RecommendedFreeBytes)
@@ -183,14 +188,15 @@ public sealed class PreflightChecker
                     PreflightCheck.DiskSpace,
                     PreflightSeverity.Warning,
                     "空き容量",
-                    $"空き容量が少なめです ({free / 1024.0 / 1024.0 / 1024.0:F1} GB / WAVで約{hours:F1}時間分)。",
-                    "長時間の会議を録音する場合は、空き容量を確保するかMP3形式を選択してください。");
+                    $"空き容量が少なめです ({free / 1024.0 / 1024.0 / 1024.0:F1} GB / 約{hours:F1}時間分)。",
+                    "長時間の会議を録音する場合は、空き容量を確保してください。"
+                    + RecordingFootprint.Describe(settings));
             }
 
             return PreflightResult.Ok(
                 PreflightCheck.DiskSpace,
                 "空き容量",
-                $"{free / 1024.0 / 1024.0 / 1024.0:F1} GB（WAVで約{hours:F0}時間分）");
+                $"{free / 1024.0 / 1024.0 / 1024.0:F1} GB（約{hours:F0}時間分）");
         }
         catch (Exception ex)
         {

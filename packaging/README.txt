@@ -40,7 +40,7 @@ MeetingRecorder — Windows 11 向け ポータブル会議録音アプリ（録
 ■ 保存されるもの
   会議ごとに次のフォルダーが作成されます。
       2026-09-07_1430_Meeting\
-        meeting.wav  （または meeting.mp3）
+        meeting.mp3  （既定。設定で WAV も選べます）
         recognition-mic.wav / recognition-system.wav
                                    ← 文字起こし用の作業音声。設定により
                                      文字起こし完了後に自動削除されます
@@ -57,6 +57,7 @@ MeetingRecorder — Windows 11 向け ポータブル会議録音アプリ（録
 ■ 動作環境
   Windows 11（Windows 10 でも動作します） / x64
   推奨: 4コア以上のCPU、RAM 8GB以上、空きディスク 2GB以上
+  （1時間の会議で、録音中は約 576MB、文字起こし後は約 86MB を使用します）
   基準環境: Core i5-1335U / RAM 16GB / 内蔵GPU（NVIDIA GPU 不要）
 
 ■ ライセンス

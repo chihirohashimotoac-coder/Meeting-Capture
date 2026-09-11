@@ -39,6 +39,11 @@ public sealed class PipelineTests : IDisposable
         SttEnabled = true,
         KeepRecognitionAudio = true,
         AutoSaveIntervalSeconds = 5,
+
+        // Stated rather than inherited: the product default is MP3, and these
+        // tests run without a transcoder, so leaving it unset would quietly turn
+        // every one of them into a test of the no-encoder fallback path.
+        Format = RecordingFormat.Wav,
     };
 
     private static RecordingPipelineOptions Options() => new();

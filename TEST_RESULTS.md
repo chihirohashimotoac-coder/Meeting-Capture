@@ -154,6 +154,10 @@ commit `f7232d4`）。
 
 | Test | Environment | Result | Notes |
 | --- | --- | --- | --- |
+| **既定の保存形式が MP3 192 kbps** | Ubuntu / GitHub Actions | PASS | 1時間あたり 346MB → 86MB |
+| **空き容量の見積もりが全書き込みを数える** | Ubuntu / GitHub Actions | PASS | 96,000 + 2×32,000 = 160,000 B/s。**修正前は meeting.wav の分しか数えず 1.67 倍の時間を表示** |
+| MP3 でも録音中の必要容量は減らない | Ubuntu / GitHub Actions | PASS | 常に WAV で書いてから変換するため |
+| 文字起こし後の残量 | Ubuntu / GitHub Actions | PASS | 削除設定 ON で音声のみ／OFF で作業音声も残る |
 | **MP3 の実ビットレートを記録する** | Ubuntu / GitHub Actions | PASS | 要求と異なる値で符号化された場合に `metadata.json` へ実値を記録し、警告を出す |
 | 要求どおり符号化できたら警告を出さない | Ubuntu / GitHub Actions | PASS | |
 | 旧既定の 96 kbps を 192 kbps へ引き上げる | Ubuntu / GitHub Actions | PASS | 96 は UI から選べなかったため「既定値」であって「選択」ではない |
