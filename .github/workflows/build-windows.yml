@@ -84,6 +84,15 @@ jobs:
           }
           if ($failed) { throw "One or more PowerShell scripts failed to parse." }
 
+      - name: Check the measurement tools
+        shell: pwsh
+        run: |
+          # tools/cer.py and tools/wav_quality.py produce the numbers that go
+          # into a test report (docs/FIELD_TEST_JA.md). A measurement tool that
+          # is quietly wrong is worse than none, so their self-tests run here.
+          python tools/cer.py selftest
+          python tools/wav_quality.py selftest
+
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@v4
         with:

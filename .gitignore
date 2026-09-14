@@ -67,3 +67,7 @@ UserSettings.json
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Python bytecode from the tools/ scripts
+__pycache__/
+*.pyc

@@ -804,6 +804,7 @@ WPF を含む完全なビルドには Windows が必要です。Linux / macOS �
 | [`BUILD.md`](BUILD.md) | ビルド・テスト・パッケージング手順 |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 技術選定の根拠、DSP定数の根拠、スレッド設計 |
 | [`docs/WINDOWS_E2E_TEST.md`](docs/WINDOWS_E2E_TEST.md) | 実機テスト手順（47項目） |
+| [`docs/FIELD_TEST_JA.md`](docs/FIELD_TEST_JA.md) | 実機テスト手順（日本語精度・録音品質・1時間安定性の測定） |
 | [`TEST_RESULTS.md`](TEST_RESULTS.md) | テスト結果と、CI で検証できない項目の分類 |
 | [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) | 第三者コンポーネントとライセンス |
 

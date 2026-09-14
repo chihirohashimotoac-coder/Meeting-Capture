@@ -51,6 +51,8 @@ commit `f7232d4`）。
 **本製品の中核である WASAPI ループバックが実サウンドカードで動作することが
 確認されました（T-09）。** 全 53 項目のうち、残る 42 項目は引き続き `Not tested` です。
 手順は [`docs/WINDOWS_E2E_TEST.md`](docs/WINDOWS_E2E_TEST.md) にあります。
+日本語文字起こし精度（CER）・録音品質・1時間連続利用時の安定性を**数値で測る**手順は
+[`docs/FIELD_TEST_JA.md`](docs/FIELD_TEST_JA.md) にあります（**未実施**）。
 
 分類:
 
