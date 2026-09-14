@@ -101,6 +101,13 @@ public sealed class SettingsStore
     /// properties are not an error, so an old file loads without complaint, and
     /// the next save writes the current shape.
     /// </para>
+    /// <para>
+    /// A migration must only touch what actually changed meaning. Anything it
+    /// rewrites unconditionally is a user's choice thrown away the next time a
+    /// version number moves, which is why the audio settings are rebuilt only
+    /// for files written before version 2 - the ones whose processing block
+    /// describes stages that no longer exist.
+    /// </para>
     /// </remarks>
     /// <summary>The MP3 bitrate that was hard-wired before it became a setting.</summary>
     private const int LegacyMp3BitrateKbps = 96;
@@ -163,11 +170,21 @@ public sealed class SettingsStore
                 + $"to {settings.Mp3BitrateKbps} kbps.");
         }
 
-        // The DSP settings from before this change describe stages that do not
-        // exist any more (gate thresholds, compressor ratios, limiter ceilings).
-        // Deserializing them would be harmless but meaningless, so the audio
-        // settings are simply rebuilt from the current defaults.
-        settings.Processing = new AudioProcessingSettings();
+        // The DSP settings from before version 2 describe stages that do not
+        // exist any more (gate thresholds, compressor ratios, limiter ceilings),
+        // so the audio settings are rebuilt from the current defaults.
+        //
+        // Only from before version 2. A version 2 or 3 file already has this
+        // shape, and rebuilding it would silently discard choices the user made
+        // - peak normalization turned off, a different target, a mix constant
+        // somebody edited by hand - for no reason other than that a version
+        // number moved. Deserialization has already populated what the file
+        // carried, and properties the file predates keep their defaults, which
+        // is exactly the wanted behaviour.
+        if (settings.Version < 2)
+        {
+            settings.Processing = new AudioProcessingSettings();
+        }
     }
 
     private static bool TryGetBool(JsonObject root, string name, out bool value)

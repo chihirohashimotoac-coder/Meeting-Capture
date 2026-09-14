@@ -39,6 +39,19 @@ namespace MeetingRecorder.Stt.Tests;
 /// profile as "accurate enough" on the strength of this table would be reporting
 /// something it did not measure.
 /// </para>
+/// <para><b>And it asserts no ordering between the profiles.</b> It used to, and
+/// the assertion was wrong. On CI's fixture - 6.7 seconds of audio, one window,
+/// 85 characters out - the run came back 2.56 s greedy, 2.55 s at beam 2,
+/// 1.89 s at beam 5, monotonically decreasing in the order the three ran rather
+/// than in beam width. That is warm-up, not decoding: one window is one encoder
+/// pass whatever the beam is, and twenty-five output tokens of decoding is far
+/// too little work to show through the first run's JIT, page faults and clock
+/// ramp. A warm-up pass now runs before the table is measured, which helps, but
+/// the honest conclusion stands - a fixture this short cannot separate the
+/// profiles, and a test that claimed it could would be measuring the runner's
+/// mood. Point it at ten minutes of real meeting audio and the table means
+/// something; what is asserted here is only what is true of the code.
+/// </para>
 /// </remarks>
 public class TranscriptionProfileBenchmarkTests
 {
@@ -103,13 +116,22 @@ public class TranscriptionProfileBenchmarkTests
             var table = new StringBuilder();
             var c = CultureInfo.InvariantCulture;
 
+            // One pass whose numbers are thrown away, so the first profile in
+            // the table is not the one that pays for the JIT, the native load
+            // and the CPU coming up to speed.
+            using (var warmUp = new WhisperSpeechRecognizer(
+                       ModelPath!, "warm-up", SpeechRecognitionOptions.For(TranscriptionProfile.Fast, Threads, Language)))
+            {
+                new OfflineTranscriptionService().Transcribe(sources, warmUp, Language);
+            }
+
             table.AppendLine(c, $"Audio: {audioSeconds:F1} s, model {Path.GetFileName(ModelPath)}, "
                               + $"{Threads} threads, language {Language}, {Environment.ProcessorCount} logical cores");
             table.AppendLine();
             table.AppendLine("| profile  | beam | temp inc | model load | inference |   total | RTF  | chunks | chars |");
             table.AppendLine("|----------|------|----------|------------|-----------|---------|------|--------|-------|");
 
-            var results = new List<(TranscriptionProfile Profile, TimeSpan Total, int Characters)>();
+            var results = new List<ProfileResult>();
 
             foreach (var profile in TranscriptionProfiles.All)
             {
@@ -132,7 +154,7 @@ public class TranscriptionProfileBenchmarkTests
                     sources, recognizer, Language, metrics: metrics);
 
                 var characters = segments.Sum(s => s.Text?.Length ?? 0);
-                results.Add((profile, metrics.TotalIncludingModelLoad, characters));
+                results.Add(new ProfileResult(profile, options, metrics.TotalIncludingModelLoad, metrics.Chunks, characters));
 
                 table.AppendLine(c,
                     $"| {TranscriptionProfiles.DisplayName(profile),-8} | {options.BeamSize,4} | "
@@ -145,18 +167,29 @@ public class TranscriptionProfileBenchmarkTests
                 Assert.True(characters > 0, $"the {profile} profile produced no text at all");
             }
 
+            table.AppendLine();
+            table.AppendLine(
+                "The times above are this runner's, on this fixture. Nothing is asserted about their");
+            table.AppendLine(
+                "order: see the class remarks for why a fixture this short cannot separate the profiles.");
+
             _output.WriteLine(table.ToString());
 
-            // The one relationship that is a property of the code rather than of
-            // the machine: greedy decoding cannot be slower than a beam search of
-            // five over the same audio on the same engine. A 25% allowance covers
-            // ordinary scheduling noise on a shared runner.
-            var fast = results.Single(r => r.Profile == TranscriptionProfile.Fast).Total;
-            var accurate = results.Single(r => r.Profile == TranscriptionProfile.Accurate).Total;
+            // What is asserted is what is true of the code rather than of the
+            // machine it ran on.
 
-            Assert.True(
-                fast <= accurate * 1.25,
-                $"the fast profile took {fast.TotalSeconds:F2}s against the accurate profile's {accurate.TotalSeconds:F2}s");
+            // Each profile reached the engine as the profile it claims to be.
+            Assert.Equal(1, results.Single(r => r.Profile == TranscriptionProfile.Fast).Options.BeamSize);
+            Assert.Equal(0f, results.Single(r => r.Profile == TranscriptionProfile.Fast).Options.TemperatureIncrement);
+            Assert.Equal(
+                SpeechDecodingDefaults.BeamSize,
+                results.Single(r => r.Profile == TranscriptionProfile.Accurate).Options.BeamSize);
+
+            // The windowing is decided before the decoder is, so the same audio
+            // has to produce the same number of windows at every profile. If it
+            // ever does not, the profile is changing something it has no business
+            // changing.
+            Assert.Single(results.Select(r => r.Chunks).Distinct());
         }
         finally
         {
@@ -166,4 +199,16 @@ public class TranscriptionProfileBenchmarkTests
             }
         }
     }
+
+    /// <param name="Profile">Which profile produced this row.</param>
+    /// <param name="Options">The decoder settings it actually asked for.</param>
+    /// <param name="Total">Model load plus the whole pass.</param>
+    /// <param name="Chunks">Windows the recognizer was handed.</param>
+    /// <param name="Characters">Transcript length. How much came back, not how much was right.</param>
+    private sealed record ProfileResult(
+        TranscriptionProfile Profile,
+        SpeechRecognitionOptions Options,
+        TimeSpan Total,
+        int Chunks,
+        int Characters);
 }

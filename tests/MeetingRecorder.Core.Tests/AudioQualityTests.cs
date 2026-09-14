@@ -1,6 +1,7 @@
 using MeetingRecorder.Core.Audio;
 using MeetingRecorder.Core.Dsp;
 using MeetingRecorder.Core.Models;
+using MeetingRecorder.Core.Pipeline;
 using MeetingRecorder.Core.Tests.TestSupport;
 using Xunit;
 
@@ -464,6 +465,203 @@ public class SpectralBalanceTests
 
             Assert.False(report.HasSignal);
             Assert.Contains("not enough signal", report.ToLogBlock("Microphone"), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+}
+
+/// <summary>
+/// Pins the cubic interpolator's overshoot to the head-room the mixer reserves
+/// for it.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Catmull-Rom interpolates its control points but is not bounded by them, and
+/// linear interpolation - which it replaced - was. That turned "two full-scale
+/// legs sum to exactly full scale" from a fact into an assumption, and the
+/// assumption was wrong: an ordinary loud signal turning around near Nyquist
+/// comes out of the interpolator at 1.25, and two such legs at the old -6.02 dB
+/// would have summed to 1.25 and been flattened by the writer's backstop clamp.
+/// </para>
+/// <para>
+/// These tests measure the bound instead of trusting it, and tie the mixer
+/// constant to what they measure, so that changing the interpolator without
+/// revisiting the head-room fails here rather than clipping somebody's meeting.
+/// </para>
+/// </remarks>
+public class ResamplerHeadroomTests
+{
+    /// <summary>
+    /// The four Catmull-Rom basis weights at interpolation position
+    /// <paramref name="t"/>, i.e. what each of the four input samples
+    /// contributes to the output.
+    /// </summary>
+    private static (double W0, double W1, double W2, double W3) Weights(double t)
+    {
+        var t2 = t * t;
+        var t3 = t2 * t;
+
+        return (
+            (-0.5 * t3) + t2 - (0.5 * t),
+            (1.5 * t3) - (2.5 * t2) + 1.0,
+            (-1.5 * t3) + (2.0 * t2) + (0.5 * t),
+            (0.5 * t3) - (0.5 * t2));
+    }
+
+    [Fact]
+    public void TheWeightsAlwaysSumToOneSoAConstantStaysConstant()
+    {
+        for (var i = 0; i <= 10000; i++)
+        {
+            var (w0, w1, w2, w3) = Weights(i / 10000.0);
+            Assert.Equal(1.0, w0 + w1 + w2 + w3, precision: 9);
+        }
+    }
+
+    [Fact]
+    public void TheMeasuredWorstCaseGainIsTheConstantTheMixerIsBuiltOn()
+    {
+        // The worst-case gain of any linear kernel over bounded inputs is the
+        // sum of the absolute weights - reached by the input whose signs match
+        // theirs.
+        var worst = 0.0;
+        var worstAt = 0.0;
+
+        for (var i = 0; i <= 100000; i++)
+        {
+            var t = i / 100000.0;
+            var (w0, w1, w2, w3) = Weights(t);
+            var gain = Math.Abs(w0) + Math.Abs(w1) + Math.Abs(w2) + Math.Abs(w3);
+
+            if (gain > worst)
+            {
+                worst = gain;
+                worstAt = t;
+            }
+        }
+
+        Assert.Equal(0.5, worstAt, precision: 3);
+        Assert.Equal(Resampler.MaximumInterpolationGain, worst, precision: 6);
+    }
+
+    [Fact]
+    public void TheMixerConstantIsInsideThatBound()
+    {
+        // Two legs, each able to arrive at MaximumInterpolationGain, must sum to
+        // no more than full scale.
+        var settings = new AudioProcessingSettings();
+        var gain = AudioMath.DbToLinear(settings.MixGainPerStreamDb);
+        var required = 1.0 / (2.0 * Resampler.MaximumInterpolationGain);
+
+        Assert.True(
+            gain <= required,
+            $"the mixer's {gain:F4} does not cover two legs at {Resampler.MaximumInterpolationGain}");
+
+        // ...and not so far under it that the recording is needlessly quiet
+        // before the normalizer sees it. 10% covers the DC blocker's slight
+        // lift at Nyquist and nothing more.
+        Assert.True(gain >= required * 0.9, $"the mixer's {gain:F4} gives away more head-room than it needs");
+    }
+
+    [Fact]
+    public void TheDcBlockerCannotTipTheSumOverEither()
+    {
+        // The interpolator is not the last stage before the mixer. A first-order
+        // high-pass has a gain slightly above one at Nyquist, and two legs at the
+        // bare arithmetic requirement of 0.4 would have reached 1.0013 - clipped
+        // by a hundredth of a decibel, which is still clipped.
+        var settings = new AudioProcessingSettings();
+        var blocker = new DcBlocker(48000, settings.DcBlockerCutoffHz);
+
+        var worst = (float)Resampler.MaximumInterpolationGain;
+        var alternating = new float[4096];
+        for (var i = 0; i < alternating.Length; i++)
+        {
+            alternating[i] = (i % 2 == 0) ? worst : -worst;
+        }
+
+        blocker.Process(alternating);
+
+        var mixer = new StreamMixer(settings, 48000);
+        var mix = new float[alternating.Length];
+        mixer.Mix(alternating, alternating, mix);
+
+        Assert.True(AudioMath.Peak(mix) <= 1.0, $"the mix peaked at {AudioMath.Peak(mix):F4}");
+    }
+
+    [Fact]
+    public void TheOvershootIsReachableByARealSignalAndTheHeadroomAbsorbsIt()
+    {
+        // A full-scale square wave alternating every sample is the signal the
+        // reviewer's [-1, +1, +1, -1] comes from: content right at Nyquist, at
+        // full amplitude, which a hot microphone on a loud transient produces.
+        var input = new float[4096];
+        for (var i = 0; i < input.Length; i++)
+        {
+            input[i] = (i / 2 % 2 == 0) ? 1f : -1f;
+        }
+
+        var resampled = new Resampler(44100, 48000).Process(input);
+        var peak = AudioMath.Peak(resampled);
+
+        // It really does overshoot - this is the defect, reproduced.
+        Assert.True(peak > 1.0, $"expected the interpolator to overshoot, saw {peak:F4}");
+        Assert.True(
+            peak <= Resampler.MaximumInterpolationGain + 1e-4,
+            $"overshoot of {peak:F4} exceeds the documented bound of {Resampler.MaximumInterpolationGain}");
+
+        // ...and the mixer's constant absorbs it, on both legs at once.
+        var mixer = new StreamMixer(new AudioProcessingSettings(), 48000);
+        var mix = new float[resampled.Length];
+        mixer.Mix(resampled, resampled, mix);
+
+        Assert.True(AudioMath.Peak(mix) <= 1.0, $"the mix peaked at {AudioMath.Peak(mix):F4}");
+    }
+
+    [Fact]
+    public void AnOvershootingCaptureIsNeverClampedByTheWriter()
+    {
+        // End to end, through the real pump. The resampler lives inside the
+        // WASAPI source, upstream of the pipeline, so what the pipeline receives
+        // from a resampled endpoint is already overshot - which is exactly what
+        // is fed in here, sustained on both legs at once, in phase. That is
+        // harsher than any real recording and it still must not reach the
+        // writer's clamp.
+        var directory = Directory.CreateTempSubdirectory("mr-headroom").FullName;
+        try
+        {
+            var worst = (float)Resampler.MaximumInterpolationGain;
+            var hostile = new float[48000];
+            for (var i = 0; i < hostile.Length; i++)
+            {
+                hostile[i] = (i / 2 % 2 == 0) ? worst : -worst;
+            }
+
+            var factory = new FakeCaptureFactory(hostile, hostile);
+            var settings = new AppSettings
+            {
+                SaveRoot = directory,
+                SttEnabled = false,
+                KeepRecognitionAudio = false,
+                Format = RecordingFormat.Wav,
+            };
+
+            var path = Path.Combine(directory, "hostile.wav");
+            using (var pipeline = new RecordingPipeline(new RecordingPipelineOptions(), factory))
+            {
+                pipeline.Start(path, settings, null);
+                Thread.Sleep(1500);
+                pipeline.Stop();
+            }
+
+            using var reader = new WavFileReader(path);
+            var samples = reader.ReadAllMono();
+
+            Assert.True(samples.Length > 0);
+            Assert.Equal(0, samples.Count(s => Math.Abs(s) >= 0.999f));
         }
         finally
         {

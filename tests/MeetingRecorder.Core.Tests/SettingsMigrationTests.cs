@@ -139,12 +139,17 @@ public sealed class SettingsMigrationTests : IDisposable
         // None of those exist, and the audio settings must come back as the
         // current defaults rather than as anything derived from them.
         var settings = LoadLegacy();
+        var defaults = new AudioProcessingSettings();
 
         Assert.NotNull(settings.Processing);
         Assert.True(settings.Processing.DcBlockerEnabled);
         Assert.True(settings.Processing.PeakNormalizationEnabled);
-        Assert.Equal(-1.0, settings.Processing.NormalizationTargetPeakDbFs);
-        Assert.Equal(-6.0206, settings.Processing.MixGainPerStreamDb, 4);
+        Assert.Equal(defaults.NormalizationTargetPeakDbFs, settings.Processing.NormalizationTargetPeakDbFs);
+
+        // Compared against the defaults rather than a literal: what this test is
+        // about is that the legacy block is discarded, not what any particular
+        // constant happens to be this month.
+        Assert.Equal(defaults.MixGainPerStreamDb, settings.Processing.MixGainPerStreamDb, 4);
     }
 
     /// <summary>
@@ -247,6 +252,47 @@ public sealed class SettingsMigrationTests : IDisposable
         Assert.Equal(RecordingFormat.Mp3, settings.Format);
         Assert.Equal(192, settings.Mp3BitrateKbps);
         Assert.True(settings.KeepRecognitionAudio);
+    }
+
+    [Fact]
+    public void AVersionThreeFileKeepsTheAudioChoicesItsOwnerMade()
+    {
+        // A migration must only rewrite what changed meaning. Version 3 already
+        // had this processing shape, so rebuilding it from defaults would throw
+        // away settings the user chose, purely because a version number moved.
+        var path = Path.Combine(_root, "settings.json");
+        File.WriteAllText(
+            path,
+            VersionThreeSettings.Replace(
+                "\"keepRecognitionAudio\": true",
+                "\"keepRecognitionAudio\": true,\n      \"processing\": { \"peakNormalizationEnabled\": false, \"normalizationTargetPeakDbFs\": -3.0 }",
+                StringComparison.Ordinal));
+
+        var settings = new SettingsStore(path).Load();
+
+        Assert.False(settings.Processing.PeakNormalizationEnabled);
+        Assert.Equal(-3.0, settings.Processing.NormalizationTargetPeakDbFs);
+
+        // ...while a property that version 3 did not have takes this build's
+        // default rather than tripping over its absence.
+        Assert.False(settings.Processing.MicrophoneListeningEqEnabled);
+        Assert.Equal(2500.0, settings.Processing.MicrophoneListeningEqCornerHz);
+    }
+
+    [Fact]
+    public void AVersionOneFileStillHasItsRemovedStagesRebuiltFromDefaults()
+    {
+        // The other side of the same rule: a version 1 processing block
+        // describes a gate, an AGC, a compressor and a limiter, none of which
+        // exist. That one really does have to be rebuilt.
+        var path = Path.Combine(_root, "legacy.json");
+        File.WriteAllText(path, LegacySettings);
+
+        var settings = new SettingsStore(path).Load();
+        var defaults = new AudioProcessingSettings();
+
+        Assert.Equal(defaults.MixGainPerStreamDb, settings.Processing.MixGainPerStreamDb);
+        Assert.Equal(defaults.PeakNormalizationEnabled, settings.Processing.PeakNormalizationEnabled);
     }
 
     [Fact]

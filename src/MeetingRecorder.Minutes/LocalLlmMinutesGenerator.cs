@@ -83,6 +83,18 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
     /// </summary>
     private const int MaxBlocks = 60;
 
+    /// <summary>
+    /// How many times the map summaries may be condensed before the reduce.
+    /// </summary>
+    /// <remarks>
+    /// Each round divides the digest by roughly the number of summaries that fit
+    /// in one prompt, so two rounds cover a digest orders of magnitude larger
+    /// than the window - far past anything <see cref="MaxBlocks"/> can produce.
+    /// The cap is here because an inference count that depends on how verbose a
+    /// model happens to be is not a budget.
+    /// </remarks>
+    private const int MaxFoldRounds = 3;
+
     private readonly string _modelPath;
     private readonly int _threads;
     private readonly uint _contextSize;
@@ -223,10 +235,16 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
                 warnings.Add($"文字起こしが長いため、先頭 {MaxBlocks} ブロック分のみを議事録生成の対象としました。");
             }
 
-            parsed = await ReduceAsync(executor, summaries, counter, metrics, progress, cancellationToken)
+            AddMapTopics(template, plan.Blocks, summaries);
+
+            // The summaries are what the reduce reads, and there can be a lot of
+            // them. Fold them down until they fit before asking for a document.
+            var digest = await FoldAsync(
+                executor, summaries, counter, promptTokens, metrics, warnings, progress, cancellationToken)
                 .ConfigureAwait(false);
 
-            AddMapTopics(template, plan.Blocks, summaries);
+            parsed = await ReduceAsync(executor, digest, counter, metrics, progress, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         if (parsed.FellBackToRawText)
@@ -324,6 +342,141 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
     }
 
     /// <summary>
+    /// Condenses the map summaries until they fit in one reduce prompt.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The map phase produces one summary per block, and a long meeting has a
+    /// lot of blocks: at the cap that is sixty summaries of up to
+    /// <see cref="BlockSummaryTokens"/> tokens each, which is several times a
+    /// 4096-token context window. Concatenating them and calling that the reduce
+    /// prompt would hand llama.cpp more than it can hold, and its answer to that
+    /// is to drop the beginning - the model would summarise the end of the
+    /// meeting and never say so.
+    /// </para>
+    /// <para>
+    /// So the summaries are folded: while they do not fit, they are grouped into
+    /// batches that do, each batch is condensed by one more inference, and the
+    /// result is re-measured. It is the same map step applied to its own output,
+    /// which is what "reduce" means when the digest is itself too big, and it
+    /// terminates because each round is strictly smaller than the last.
+    /// </para>
+    /// <para>
+    /// Rounds are capped all the same, because an inference budget that depends
+    /// on a model's verbosity is not a budget. If the cap is reached the digest
+    /// is cut to what fits and the document says so, rather than letting the
+    /// context window silently decide which half of the meeting counts.
+    /// </para>
+    /// </remarks>
+    private async Task<string> FoldAsync(
+        StatelessExecutor executor,
+        IReadOnlyList<string> summaries,
+        ITokenCounter counter,
+        int promptTokens,
+        MinutesMetrics metrics,
+        List<string> warnings,
+        IProgress<MinutesProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var current = summaries.ToList();
+
+        for (var round = 0; round < MaxFoldRounds; round++)
+        {
+            var digest = string.Join("\n", current);
+            if (MinutesPlanner.FitsInOnePass(
+                    counter.Count(digest), promptTokens, StructuredOutputTokens, (int)_contextSize))
+            {
+                return digest;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            progress?.Report(new MinutesProgress($"要点をさらにまとめ中 ({round + 1})", metrics.MapInferences, metrics.MapInferences + 2));
+
+            var batches = MinutesPlanner.Plan(
+                current.Select(line => line + "\n").ToList(),
+                counter,
+                promptTokens,
+                BlockSummaryTokens,
+                (int)_contextSize,
+                MaxBlocks);
+
+            // One batch that still does not fit means the plan cannot shrink it
+            // any further - a single summary longer than the window. Stop rather
+            // than spin.
+            if (batches.Blocks.Count <= 1)
+            {
+                break;
+            }
+
+            var folded = new List<string>(batches.Blocks.Count);
+            foreach (var batch in batches.Blocks)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var prompt =
+                    "次は会議の要点メモの一部です。重複を除いて要点だけを日本語の箇条書きにまとめ直してください。\n" +
+                    "書かれていない内容を足してはいけません。要点が無ければ「なし」と出力してください。\n\n---\n" + batch + "\n---";
+
+                var clock = Stopwatch.StartNew();
+                var condensed = await InferAsync(executor, prompt, BlockSummaryTokens, cancellationToken).ConfigureAwait(false);
+                clock.Stop();
+
+                metrics.MapInferences++;
+                metrics.MapTime += clock.Elapsed;
+                metrics.PromptTokens += counter.Count(prompt);
+                metrics.OutputTokens += counter.Count(condensed);
+
+                if (!string.IsNullOrWhiteSpace(condensed) && !condensed.Trim().Equals("なし", StringComparison.Ordinal))
+                {
+                    folded.Add(condensed.Trim());
+                }
+            }
+
+            if (folded.Count == 0 || folded.Count >= current.Count)
+            {
+                break;
+            }
+
+            current = folded;
+        }
+
+        // Either the fold ran out of rounds or it stopped shrinking. Take what
+        // fits and say so - a shorter document is recoverable, a document that
+        // silently covers only part of the meeting is not.
+        var final = TakeWhatFits(current, counter, promptTokens);
+        if (final.Count < current.Count)
+        {
+            warnings.Add(
+                $"要点メモがモデルのコンテキスト長に収まらないため、{current.Count} 件中 {final.Count} 件から議事録を作成しました。"
+                + "会議の後半が反映されていない可能性があります。transcript.md の原文で確認してください。");
+        }
+
+        return string.Join("\n", final);
+    }
+
+    /// <summary>As many summaries as fit in one reduce prompt, from the start.</summary>
+    private List<string> TakeWhatFits(IReadOnlyList<string> summaries, ITokenCounter counter, int promptTokens)
+    {
+        var kept = new List<string>();
+        var tokens = 0;
+        var budget = MinutesPlanner.Budget((int)_contextSize) - promptTokens - StructuredOutputTokens;
+
+        foreach (var summary in summaries)
+        {
+            var cost = counter.Count(summary) + 1;
+            if (kept.Count > 0 && tokens + cost > budget)
+            {
+                break;
+            }
+
+            kept.Add(summary);
+            tokens += cost;
+        }
+
+        return kept;
+    }
+
+    /// <summary>
     /// The four section prompts, collapsed into one.
     /// </summary>
     /// <remarks>
@@ -335,7 +488,7 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
     /// </remarks>
     private async Task<MinutesResponseParser.Result> ReduceAsync(
         StatelessExecutor executor,
-        IReadOnlyList<string> summaries,
+        string digest,
         ITokenCounter counter,
         MinutesMetrics metrics,
         IProgress<MinutesProgress>? progress,
@@ -343,7 +496,6 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
     {
         progress?.Report(new MinutesProgress("議事録をまとめ中", metrics.MapInferences, metrics.MapInferences + 1));
 
-        var digest = string.Join("\n", summaries);
         var prompt = BuildStructuredPrompt(
             "次は会議の要点メモです。このメモに書かれている内容だけを使って議事録を作成してください。",
             digest);

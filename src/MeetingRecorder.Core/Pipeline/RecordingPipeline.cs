@@ -132,6 +132,9 @@ public sealed class RecordingPipeline : IDisposable
     private CancellationTokenSource? _cts;
     private Stopwatch? _clock;
     private long _producedSamples;
+    private long _micClippedSamples;
+    private long _systemClippedSamples;
+    private long _legSamples;
     private double _micSilenceSeconds;
     private double _systemSilenceSeconds;
     private DateTime _lastFlushUtc;
@@ -296,6 +299,9 @@ public sealed class RecordingPipeline : IDisposable
         _micMeter.Reset();
         _systemMeter.Reset();
         _producedSamples = 0;
+        _micClippedSamples = 0;
+        _systemClippedSamples = 0;
+        _legSamples = 0;
         _micSilenceSeconds = 0;
         _systemSilenceSeconds = 0;
 
@@ -626,6 +632,15 @@ public sealed class RecordingPipeline : IDisposable
             system.Clear();
         }
 
+        // Clipping is counted here, on each leg, and not from the finished file.
+        // By the time the mix is written each leg has been multiplied by a
+        // constant well under one, so an input that arrived already flattened no
+        // longer reads as flattened - it reads as a loud recording. Counting it
+        // where it arrives is what makes the warning about an over-driven input
+        // a measurement instead of an accident of what that constant happens to
+        // be.
+        CountClipping(mic, system);
+
         // One filter, applied once, feeding both destinations. The recognition
         // path and the file path used to diverge here because the file was run
         // through a gate, an AGC, a compressor and a limiter that would have
@@ -646,6 +661,38 @@ public sealed class RecordingPipeline : IDisposable
 
         _mixer!.Mix(micForMix, system, mix);
         _writer!.Write(mix);
+    }
+
+    /// <summary>
+    /// Counts samples that arrived at or beyond full scale, per leg.
+    /// </summary>
+    /// <remarks>
+    /// One comparison per sample on the pump thread, which is nothing next to
+    /// the filtering and the two file writes already happening there. A muted
+    /// leg has been zeroed by this point and therefore counts nothing, which is
+    /// right: what is not in the file cannot have spoiled it.
+    /// </remarks>
+    private void CountClipping(ReadOnlySpan<float> mic, ReadOnlySpan<float> system)
+    {
+        var threshold = (float)_options.Processing.ClipDetectionThreshold;
+
+        for (var i = 0; i < mic.Length; i++)
+        {
+            if (Math.Abs(mic[i]) >= threshold)
+            {
+                _micClippedSamples++;
+            }
+        }
+
+        for (var i = 0; i < system.Length; i++)
+        {
+            if (Math.Abs(system[i]) >= threshold)
+            {
+                _systemClippedSamples++;
+            }
+        }
+
+        _legSamples += mic.Length;
     }
 
     /// <summary>
@@ -930,8 +977,13 @@ public sealed class RecordingPipeline : IDisposable
         ReportCaptureGaps(duration);
 
         _logger.Info(nameof(RecordingPipeline), $"Recording stopped after {duration:hh\\:mm\\:ss} -> {path}");
-        return new RecordingResult(path, duration, Warnings, recognitionDirectory, CaptureFormats);
+        return new RecordingResult(
+            path, duration, Warnings, recognitionDirectory, CaptureFormats, MeasureCaptureClipping());
     }
+
+    /// <summary>What each leg's clipping counters add up to.</summary>
+    private CaptureClipping MeasureCaptureClipping()
+        => new(_micClippedSamples, _systemClippedSamples, _legSamples, _options.Processing.ClipDetectionSampleFraction);
 
     /// <summary>
     /// Says so when the microphone starved and silence had to be written in its
@@ -1034,14 +1086,57 @@ public sealed class RecordingPipeline : IDisposable
 /// Where the per-stream working audio was kept, or null when it was not. This
 /// is what a later transcription reads.
 /// </param>
+/// <summary>
+/// How much of each capture leg arrived at or beyond full scale.
+/// </summary>
+/// <remarks>
+/// Measured on the legs rather than on the finished file, because the mixer
+/// multiplies each leg by a constant well under one before the file is written:
+/// audio that was already flattened when it arrived does not look flattened
+/// afterwards. This is the evidence behind telling a user their input was
+/// over-driven, and nothing here claims the flattened peaks can be recovered.
+/// </remarks>
+/// <param name="MicrophoneSamples">Microphone samples at or beyond the clip threshold.</param>
+/// <param name="SystemAudioSamples">PC-audio samples at or beyond the clip threshold.</param>
+/// <param name="SamplesPerLeg">Samples inspected on each leg.</param>
+/// <param name="Threshold">
+/// Fraction of one leg that must be flattened before it is called clipping.
+/// </param>
+public readonly record struct CaptureClipping(
+    long MicrophoneSamples,
+    long SystemAudioSamples,
+    long SamplesPerLeg,
+    double Threshold)
+{
+    /// <summary>Flattened fraction of the worse leg, 0 when nothing was captured.</summary>
+    public double WorstFraction => SamplesPerLeg <= 0
+        ? 0
+        : Math.Max(MicrophoneSamples, SystemAudioSamples) / (double)SamplesPerLeg;
+
+    /// <summary>
+    /// True when either leg is flattened often enough to be distortion.
+    /// </summary>
+    /// <remarks>
+    /// Either leg, not their sum: a microphone driven into its limit is a
+    /// problem the user can fix whatever the PC-audio leg was doing, and
+    /// averaging the two would let a clean leg hide a ruined one.
+    /// </remarks>
+    public bool IsClipped => SamplesPerLeg > 0 && WorstFraction >= Threshold;
+}
+
 /// <param name="CaptureFormats">
 /// What each endpoint actually delivered. The evidence behind any claim about
 /// audio quality, and the reason a device's own band limit is never confused
 /// with something this application did.
+/// </param>
+/// <param name="Clipping">
+/// How much of each leg arrived already flattened. See
+/// <see cref="CaptureClipping"/> for why this is not read off the finished file.
 /// </param>
 public sealed record RecordingResult(
     string AudioFilePath,
     TimeSpan Duration,
     IReadOnlyList<string> Warnings,
     string? RecognitionAudioDirectory = null,
-    IReadOnlyList<CaptureFormatReport>? CaptureFormats = null);
+    IReadOnlyList<CaptureFormatReport>? CaptureFormats = null,
+    CaptureClipping Clipping = default);

@@ -496,11 +496,10 @@ public sealed class PipelineTests : IDisposable
     [Fact]
     public void AQuietRecordingIsRaisedByOneConstantGainWhenItStops()
     {
-        // The mixer deliberately writes 6 dB down so two full-scale streams
-        // cannot clip. Stopping is where that head-room is handed back - once,
-        // to the whole file, now that its real peak is known.
-        // -16.5 dBFS in the mixed file: quiet enough to need a real boost, loud
-        // enough that the boost cap does not bind.
+        // The mixer deliberately writes down so two overshooting streams cannot
+        // clip. Stopping is where that head-room is handed back - once, to the
+        // whole file, now that its real peak is known. Quiet enough to need a
+        // real boost, loud enough that the +20 dB cap does not bind.
         var factory = new FakeCaptureFactory(
             SignalGenerator.Sine(220, 1.0, 48000, 0.3),
             SignalGenerator.Silence(1.0, 48000));
@@ -513,8 +512,17 @@ public sealed class PipelineTests : IDisposable
         Thread.Sleep(1500);
         var summary = manager.Stop();
 
+        // Derived rather than hard-coded, so the head-room constant and this
+        // expectation cannot drift apart: a 0.3 amplitude leg against silence
+        // reaches the target from wherever the mixer left it.
+        var expectedGainDb = settings.Processing.NormalizationTargetPeakDbFs
+                             - AudioMath.LinearToDb(0.3 * AudioMath.DbToLinear(settings.Processing.MixGainPerStreamDb));
+
         Assert.NotNull(summary.Metadata.AppliedGainDb);
-        Assert.InRange(summary.Metadata.AppliedGainDb!.Value, 14.0, 16.5);
+        Assert.InRange(summary.Metadata.AppliedGainDb!.Value, expectedGainDb - 1.0, expectedGainDb + 0.2);
+        Assert.True(
+            expectedGainDb < settings.Processing.MaxNormalizationGainDb,
+            "the fixture has to sit below the boost cap or this measures the cap instead");
 
         using var reader = new WavFileReader(summary.AudioPath);
         var peak = AudioMath.Peak(reader.ReadAllMono());
@@ -572,8 +580,8 @@ public sealed class PipelineTests : IDisposable
     public void ARecordingThatWasAlreadyClippedAtTheInputIsReportedToTheUser()
     {
         // A square wave at full scale is what an over-driven input produces.
-        // Halved by the mixer it no longer reads as clipped in the file, so the
-        // check has to run on what was captured - and it must say so rather than
+        // Scaled down by the mixer it no longer reads as clipped in the file, so
+        // the check runs on what was captured - and it must say so rather than
         // claim to have fixed it.
         var square = new float[48000];
         for (var i = 0; i < square.Length; i++)
@@ -594,6 +602,57 @@ public sealed class PipelineTests : IDisposable
         Assert.True(summary.Metadata.SourceClipped);
         Assert.Contains(summary.Warnings, w => w.Contains("既に歪んでいます"));
         Assert.Contains(summary.Warnings, w => w.Contains("復元できません"));
+
+        // And the file itself is not clipped - the detection cannot have come
+        // from reading it back.
+        using var reader = new WavFileReader(summary.AudioPath);
+        Assert.True(AudioMath.Peak(reader.ReadAllMono()) < 0.999);
+    }
+
+    [Fact]
+    public void OneOverDrivenLegIsReportedEvenThoughTheMixIsNowhereNearFullScale()
+    {
+        // The case the old file-based check could never see. A clipped
+        // microphone against a silent PC leg produces a mix at well under half
+        // scale, and a user whose microphone gain is ruining every recording
+        // heard nothing about it.
+        var square = new float[48000];
+        for (var i = 0; i < square.Length; i++)
+        {
+            square[i] = (i / 100) % 2 == 0 ? 1f : -1f;
+        }
+
+        var factory = new FakeCaptureFactory(square, SignalGenerator.Silence(1.0, 48000));
+
+        using var manager = new MeetingSessionManager(factory);
+        var settings = CreateSettings();
+        settings.SttEnabled = false;
+
+        manager.Start(settings, "one-leg-clipped");
+        Thread.Sleep(1500);
+        var summary = manager.Stop();
+
+        Assert.True(summary.Metadata.SourceClipped);
+        Assert.Contains(summary.Warnings, w => w.Contains("マイク") && w.Contains("既に歪んでいます"));
+    }
+
+    [Fact]
+    public void ACleanRecordingIsNotReportedAsOverDriven()
+    {
+        var factory = new FakeCaptureFactory(
+            SignalGenerator.Sine(220, 1.0, 48000, 0.9),
+            SignalGenerator.Sine(660, 1.0, 48000, 0.9));
+
+        using var manager = new MeetingSessionManager(factory);
+        var settings = CreateSettings();
+        settings.SttEnabled = false;
+
+        manager.Start(settings, "clean");
+        Thread.Sleep(1500);
+        var summary = manager.Stop();
+
+        Assert.False(summary.Metadata.SourceClipped);
+        Assert.DoesNotContain(summary.Warnings, w => w.Contains("既に歪んでいます"));
     }
 
     [Fact]

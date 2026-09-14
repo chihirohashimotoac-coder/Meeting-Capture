@@ -46,9 +46,48 @@ namespace MeetingRecorder.Core.Dsp;
 /// samples are copied. The microphone leg is the one that pays, which is why
 /// the difference was audible on one stream and not the other.
 /// </para>
+/// <para>
+/// The cubic is not free of consequences. Unlike linear interpolation it can
+/// overshoot the samples it is interpolating between - see
+/// <see cref="MaximumInterpolationGain"/> for by how much, and for where the
+/// head-room to absorb it comes from.
+/// </para>
 /// </remarks>
 public sealed class Resampler
 {
+    /// <summary>
+    /// Largest factor the interpolation can multiply a bounded input by.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Exactly 5/4, and not a rounding artefact: Catmull-Rom interpolates its
+    /// control points but is not bounded by them. Its four basis weights sum to
+    /// one at every position - so a constant stays constant - but two of them go
+    /// negative between the sample instants, and the sum of their magnitudes,
+    /// which is the worst-case gain over every bounded input, peaks at 1.25
+    /// exactly half way between two samples. The input that reaches it is not
+    /// exotic: <c>[-1, +1, +1, -1]</c> - a full-scale signal turning around near
+    /// Nyquist - comes out at 1.25.
+    /// </para>
+    /// <para>
+    /// Linear interpolation had no such property, because a weighted average of
+    /// two samples cannot leave their range. Replacing it therefore put an
+    /// overshoot into a path that did not have one, and the head-room for it has
+    /// to come from somewhere. It comes from
+    /// <see cref="Models.AudioProcessingSettings.MixGainPerStreamDb"/>, which is
+    /// derived from this constant - not from clamping the interpolator. A clamp
+    /// would be a signal-dependent nonlinearity in the one path this application
+    /// promises is linear, whereas the head-room costs nothing permanent: the
+    /// peak normalizer hands it back, as one constant, once the file is closed.
+    /// </para>
+    /// <para>
+    /// <c>ResamplerHeadroomTests</c> measures this rather than taking it on
+    /// trust - it sweeps the interpolation position, sums the absolute basis
+    /// weights, and asserts both the peak and that the weights still sum to one.
+    /// </para>
+    /// </remarks>
+    public const double MaximumInterpolationGain = 1.25;
+
     private readonly Biquad[] _antiAlias;
     private readonly double _ratio;
 
