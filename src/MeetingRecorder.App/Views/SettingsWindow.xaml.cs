@@ -168,14 +168,6 @@ public partial class SettingsWindow : Window
         DeleteRecognitionAudioAfterTranscription = DeleteRecognitionAudioCheck?.IsChecked == true,
     };
 
-    /// <param name="Profile">The profile this row selects.</param>
-    /// <param name="Label">What the combo box shows.</param>
-    private sealed record ProfileRow(TranscriptionProfile Profile, string Label);
-
-    /// <param name="Mode">The minutes generation mode this row selects.</param>
-    /// <param name="Label">What the combo box shows.</param>
-    private sealed record MinutesModeRow(MinutesGenerationMode Mode, string Label);
-
     private void OnTranscriptionProfileChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
         => UpdateTranscriptionProfileText();
 
@@ -232,10 +224,12 @@ public partial class SettingsWindow : Window
         TranscriptionProfileCombo.ItemsSource = TranscriptionProfiles.All
             .Select(p => new ProfileRow(p, TranscriptionProfiles.DisplayName(p)))
             .ToList();
-        TranscriptionProfileCombo.SelectedIndex = TranscriptionProfiles.All
-            .Select((p, i) => (Profile: p, Index: i))
-            .FirstOrDefault(x => x.Profile == settings.TranscriptionProfile, (settings.TranscriptionProfile, 1))
-            .Index;
+        // Balanced when the stored value is not one this build knows: a settings
+        // file can be hand-edited, or written by a later version.
+        var profileIndex = TranscriptionProfiles.All.ToList().IndexOf(settings.TranscriptionProfile);
+        TranscriptionProfileCombo.SelectedIndex = profileIndex >= 0
+            ? profileIndex
+            : TranscriptionProfiles.All.ToList().IndexOf(TranscriptionProfile.Balanced);
         UpdateTranscriptionProfileText();
 
         MinutesModeCombo.ItemsSource = new List<MinutesModeRow>
