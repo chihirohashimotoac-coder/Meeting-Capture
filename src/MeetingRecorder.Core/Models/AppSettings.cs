@@ -10,12 +10,13 @@ namespace MeetingRecorder.Core.Models;
 public sealed class AppSettings
 {
     /// <summary>
-    /// Bumped to 2 when live transcription was removed. A version 1 file is
-    /// still read: <see cref="Persistence.SettingsStore"/> maps the settings
-    /// that changed meaning and ignores the ones that no longer exist, so an
-    /// upgrade keeps the user's choices instead of resetting them.
+    /// Bumped to 2 when live transcription was removed, and to 4 when the
+    /// transcription and minutes speed profiles arrived. Older files are still
+    /// read: <see cref="Persistence.SettingsStore"/> maps the settings that
+    /// changed meaning and ignores the ones that no longer exist, so an upgrade
+    /// keeps the user's choices instead of resetting them.
     /// </summary>
-    public const int CurrentVersion = 3;
+    public const int CurrentVersion = 4;
 
     public int Version { get; set; } = CurrentVersion;
 
@@ -132,6 +133,27 @@ public sealed class AppSettings
     public string SttLanguage { get; set; } = "ja";
 
     /// <summary>
+    /// How hard the decoder searches, and therefore how long a transcription
+    /// takes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Balanced by default. <see cref="TranscriptionProfile.Accurate"/> is
+    /// exactly what this application did before the setting existed, so nobody
+    /// who wants the old behaviour has lost it - they simply have to ask for it
+    /// now, and are told what it costs.
+    /// </para>
+    /// <para>
+    /// A file written by an older build has no value here and gets the default.
+    /// That is a deliberate change of behaviour rather than an oversight: it is
+    /// the choice this change exists to offer, and defaulting an existing user
+    /// back into the slowest setting would hide it from exactly the people who
+    /// asked for it.
+    /// </para>
+    /// </remarks>
+    public TranscriptionProfile TranscriptionProfile { get; set; } = TranscriptionProfile.Balanced;
+
+    /// <summary>
     /// Whether the transcription feature is offered at all.
     /// </summary>
     /// <remarks>
@@ -181,9 +203,24 @@ public sealed class AppSettings
 
     // ---- Optional / experimental ----------------------------------------
 
+    /// <summary>
+    /// Whether speaker clustering runs during transcription.
+    /// </summary>
+    /// <remarks>
+    /// It is a request, not a guarantee:
+    /// <see cref="TranscriptionProfile.Fast"/> switches clustering off whatever
+    /// this says, because clustering is the part of a transcription that can
+    /// most obviously be skipped and the fast profile is the setting that means
+    /// "skip what can be skipped". Whether the words came from the microphone or
+    /// from the PC is never affected by any of this - that comes from which file
+    /// the audio was read out of, not from a model.
+    /// </remarks>
     public bool DiarizationEnabled { get; set; } = true;
 
     public bool MinutesEnabled { get; set; } = true;
+
+    /// <summary>How the minutes are produced.</summary>
+    public MinutesGenerationMode MinutesMode { get; set; } = MinutesGenerationMode.LocalLlm;
 
     /// <summary>Catalog id of the local GGUF model used for minutes, or null.</summary>
     public string? LlmModelId { get; set; }

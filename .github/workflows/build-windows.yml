@@ -218,7 +218,7 @@ jobs:
           dotnet test tests/MeetingRecorder.Stt.Tests/MeetingRecorder.Stt.Tests.csproj
           --configuration Release
           --no-build
-          --filter "FullyQualifiedName~RealModelRecognitionTests"
+          --filter "FullyQualifiedName~RealModelRecognitionTests|FullyQualifiedName~TranscriptionProfileBenchmarkTests"
           --logger "console;verbosity=detailed"
 
       - name: Install a virtual audio endpoint (CI fixture only)

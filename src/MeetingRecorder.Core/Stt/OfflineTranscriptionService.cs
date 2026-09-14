@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using MeetingRecorder.Core.Audio;
 using MeetingRecorder.Core.Diagnostics;
 using MeetingRecorder.Core.Models;
@@ -31,10 +32,23 @@ public readonly record struct TranscriptionProgress(double ProcessedSeconds, dou
 /// Nothing is waiting for this, and that single fact decides every choice in
 /// here. The recorder no longer transcribes while it records - there is no
 /// caption on screen to be late, and no second pass repairing a first one - so
-/// the window handed to the engine is as long as whisper can use, it is cut at
-/// a silence rather than at a stopwatch, the search is a beam search, and
-/// whisper's temperature fallback is on. Those are the settings that cost
-/// latency and buy accuracy, and latency is no longer a currency here.
+/// the window handed to the engine is as long as whisper can use and it is cut
+/// at a silence rather than at a stopwatch.
+/// </para>
+/// <para>
+/// How hard the engine then searches inside that window is the user's call:
+/// <see cref="Models.TranscriptionProfile"/> selects the beam width and whether
+/// temperature fallback runs, and <see cref="SpeechRecognitionOptions.For"/>
+/// turns the choice into decoder settings. This class does not have an opinion
+/// about it. What it does have an opinion about is the shape of the work, and
+/// that is <see cref="TargetWindowSeconds"/>: filling a window rather than
+/// ending it at the first pause is what stops a ten minute meeting buying sixty
+/// full encoder passes.
+/// </para>
+/// <para>
+/// Every pass leaves a <see cref="TranscriptionMetrics"/> behind, because the
+/// alternative to measuring where the time goes is guessing, and this is a part
+/// of the application people wait on.
 /// </para>
 /// <para>
 /// It reads per-source audio rather than a mixed file. For a recording made by
@@ -79,12 +93,62 @@ public sealed class OfflineTranscriptionService
     /// <summary>Audio kept before a detected onset, so the first consonant is never clipped off.</summary>
     public const double PreRollMs = 300;
 
+    /// <summary>
+    /// How full a window has to be before a silence is allowed to close it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the single largest lever on how long a transcription takes, and
+    /// it is not obvious. whisper.cpp pads whatever audio it is handed out to
+    /// its 30 second receptive field before running the encoder, so a three
+    /// second window and a twenty-six second window cost the encoder exactly the
+    /// same. Ending a window at every pause therefore does not save any work -
+    /// it multiplies it, because a meeting with sixty pauses buys sixty full
+    /// encoder passes for ten minutes of audio.
+    /// </para>
+    /// <para>
+    /// So a window keeps filling across pauses until it holds this much, and
+    /// only then does the next silence close it. 20 seconds against a 27 second
+    /// ceiling leaves room for the utterance in progress to finish inside the
+    /// same window instead of being cut for length. The audio inside a window is
+    /// still contiguous - the pauses are kept, not spliced out - so every
+    /// timestamp the engine returns still maps straight back onto the recording.
+    /// </para>
+    /// <para>
+    /// It costs nothing in accuracy and most likely gains some: whisper was
+    /// trained on 30 second windows, and a longer window is more context, not
+    /// less.
+    /// </para>
+    /// </remarks>
+    public const double TargetWindowSeconds = 20.0;
+
+    /// <summary>
+    /// How long a part-filled window will sit through a silence before being
+    /// emitted anyway.
+    /// </summary>
+    /// <remarks>
+    /// Without a limit, the last utterance before a five minute quiet stretch
+    /// would collect the whole stretch. Three seconds is comfortably longer than
+    /// a pause inside a conversation and comfortably shorter than a gap between
+    /// two of them, and everything past
+    /// <see cref="SilenceFlushMs"/> is trimmed off the tail before the window is
+    /// handed over regardless.
+    /// </remarks>
+    public const double MaxCarriedSilenceMs = 3000;
+
     private readonly ILogger _logger;
+    private TranscriptionMetrics _metrics = new();
 
     public OfflineTranscriptionService(ILogger? logger = null)
     {
         _logger = logger ?? NullLogger.Instance;
     }
+
+    /// <summary>
+    /// Where the last pass spent its time. Valid once
+    /// <see cref="Transcribe"/> has returned.
+    /// </summary>
+    public TranscriptionMetrics? Metrics { get; private set; }
 
     /// <summary>
     /// Walks every source and returns the transcript, ordered by time.
@@ -105,10 +169,16 @@ public sealed class OfflineTranscriptionService
         IReadOnlyList<TranscriptSegment>? previous = null,
         IProgress<TranscriptionProgress>? progress = null,
         ISpeakerDiarizer? diarizer = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        TranscriptionMetrics? metrics = null)
     {
         ArgumentNullException.ThrowIfNull(sources);
         ArgumentNullException.ThrowIfNull(recognizer);
+
+        _metrics = metrics ?? new TranscriptionMetrics();
+        _metrics.ModelId = recognizer.ModelId;
+        _metrics.DiarizationEnabled = diarizer is { IsEnabled: true };
+        var wallClock = Stopwatch.StartNew();
 
         var usable = sources.Where(s => !string.IsNullOrWhiteSpace(s.Path) && File.Exists(s.Path)).ToList();
         if (usable.Count == 0)
@@ -126,6 +196,7 @@ public sealed class OfflineTranscriptionService
             {
                 using var probe = new WavFileReader(source.Path);
                 totalSeconds += probe.DurationSeconds;
+                _metrics.NoteSource(source.Source, probe.DurationSeconds);
             }
             catch (Exception ex)
             {
@@ -144,12 +215,20 @@ public sealed class OfflineTranscriptionService
                 source, recognizer, language, segments, processedSeconds, totalSeconds, progress, diarizer, cancellationToken);
         }
 
+        var formatting = Stopwatch.StartNew();
         segments.Sort((a, b) => a.StartMs.CompareTo(b.StartMs));
         CarryOverSpeakerNames(segments, previous);
+        formatting.Stop();
+
+        _metrics.Formatting = formatting.Elapsed;
+        _metrics.Segments = segments.Count;
+        _metrics.Total = wallClock.Elapsed;
+        Metrics = _metrics;
 
         _logger.Info(
             nameof(OfflineTranscriptionService),
             $"Transcribed {totalSeconds:F0}s of audio from {usable.Count} source(s) into {segments.Count} segment(s).");
+        _logger.Info(nameof(OfflineTranscriptionService), Environment.NewLine + _metrics.ToLogBlock());
 
         progress?.Report(new TranscriptionProgress(totalSeconds, totalSeconds, segments.Count));
         return segments;
@@ -188,7 +267,9 @@ public sealed class OfflineTranscriptionService
             preRollMs: PreRollMs,
             silenceFlushMs: SilenceFlushMs,
             overlapMs: OverlapMs,
-            vad: null);
+            vad: null,
+            targetChunkSeconds: TargetWindowSeconds,
+            maxCarriedSilenceMs: MaxCarriedSilenceMs);
 
         var buffer = new float[SpeechConstants.SampleRate];
         var lastReport = DateTime.UtcNow;
@@ -225,6 +306,10 @@ public sealed class OfflineTranscriptionService
             Recognize(tail, recognizer, language, segments, diarizer, cancellationToken);
         }
 
+        _metrics.SpeechSecondsDetected += chunker.SpeechSeconds;
+        _metrics.SubmittedAudioSeconds += chunker.EmittedSeconds;
+        _metrics.Chunks += (int)chunker.ChunkCount;
+
         return processedSeconds;
     }
 
@@ -237,20 +322,25 @@ public sealed class OfflineTranscriptionService
         CancellationToken cancellationToken)
     {
         IReadOnlyList<RecognizedSpan> spans;
+        var inference = Stopwatch.StartNew();
         try
         {
             spans = recognizer.Transcribe(chunk.Samples, language, cancellationToken);
         }
         catch (OperationCanceledException)
         {
+            _metrics.WhisperInference += inference.Elapsed;
             throw;
         }
         catch (Exception ex)
         {
+            _metrics.WhisperInference += inference.Elapsed;
             // One bad window must not cost the rest of the meeting.
             _logger.Error(nameof(OfflineTranscriptionService), $"Transcribing a window at {chunk.StartMs} ms failed.", ex);
             return;
         }
+
+        _metrics.WhisperInference += inference.Elapsed;
 
         foreach (var span in spans)
         {
@@ -284,6 +374,7 @@ public sealed class OfflineTranscriptionService
             return null;
         }
 
+        var clock = Stopwatch.StartNew();
         try
         {
             var samples = chunk.Samples;
@@ -302,6 +393,14 @@ public sealed class OfflineTranscriptionService
                 nameof(OfflineTranscriptionService),
                 $"Speaker clustering failed for one span; continuing without a speaker: {ex.Message}");
             return null;
+        }
+        finally
+        {
+            // Measured separately from the recognizer because they are separate
+            // decisions: a user who wants a faster transcript can turn speaker
+            // clustering off, and this is the number that says whether that is
+            // worth doing.
+            _metrics.Diarization += clock.Elapsed;
         }
     }
 

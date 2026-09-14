@@ -749,6 +749,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
+        var decoding = _services.TranscriptionDecoding();
         var diarizer = meeting.HasSourceAttribution ? _services.TryCreateDiarizer() : null;
         _transcriptionCts = new CancellationTokenSource();
         WorkflowState = MeetingWorkflowState.Transcribing;
@@ -773,6 +774,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             var language = _services.Settings.SttLanguage;
             var sources = meeting.TranscriptionSources;
 
+            // Everything the run is about to be judged on, filled in before it
+            // starts: the model load happened in TryCreateTranscriptionRecognizer
+            // and only the caller knows how long it took.
+            var metrics = new TranscriptionMetrics
+            {
+                ModelLoad = _services.LastModelLoadTime,
+                Profile = _services.Settings.TranscriptionProfile,
+                BeamSize = decoding.BeamSize,
+                TemperatureIncrement = decoding.TemperatureIncrement,
+                Threads = decoding.Threads,
+            };
+
             var segments = await Task.Run(() => new OfflineTranscriptionService(_services.Logger).Transcribe(
                 sources,
                 recognizer,
@@ -780,7 +793,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 previous,
                 progress,
                 diarizer,
-                token));
+                token,
+                metrics));
+
 
             // Replacing rather than merging: a transcription produces its own
             // segmentation, and interleaving two of them would read as neither.
@@ -792,7 +807,20 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
             outcome = TranscriptionOutcome.Completed;
             WorkflowState = MeetingWorkflowState.TranscriptReady;
-            TranscriptionStatus = $"文字起こしが完了しました（{segments.Count} 件）。";
+            TranscriptionStatus =
+                $"文字起こしが完了しました（{segments.Count} 件、{metrics.TotalIncludingModelLoad.TotalSeconds:F0} 秒、"
+                + $"録音長の {metrics.RealTimeFactor:F2} 倍、{TranscriptionProfiles.DisplayName(metrics.Profile)}）。";
+
+            // The breakdown, on screen rather than only in the log: a user who
+            // wants to know whether a different profile is worth trying should
+            // not have to find a log file first. The full block is still logged.
+            DiagnosticsText =
+                $"文字起こし: モデル読込 {metrics.ModelLoad.TotalSeconds:F1}s / "
+                + $"認識 {metrics.WhisperInference.TotalSeconds:F1}s / "
+                + $"話者分離 {metrics.Diarization.TotalSeconds:F1}s / "
+                + $"合計 {metrics.TotalIncludingModelLoad.TotalSeconds:F1}s / "
+                + $"RTF {metrics.RealTimeFactor:F2} / "
+                + $"窓 {metrics.Chunks} 個 ({metrics.SubmittedAudioSeconds:F0}s 投入)";
             StatusMessage = $"{TranscriptionStatus} 保存先: {meeting.Folder.Path}";
             RefreshSpeakers();
         }
@@ -1215,7 +1243,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private IMinutesGenerator CreateMinutesGenerator()
     {
         var settings = _services.Settings;
-        if (!settings.MinutesEnabled || settings.Profile?.MinutesEnabled == false)
+        if (!settings.MinutesEnabled
+            || settings.Profile?.MinutesEnabled == false
+            || settings.MinutesMode == MinutesGenerationMode.Extractive)
         {
             return new ExtractiveMinutesGenerator();
         }

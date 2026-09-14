@@ -118,6 +118,37 @@ public sealed class AppServices : IDisposable
         => ModelCatalog.Find(Settings.SttModelId ?? Settings.Profile?.SttModelId);
 
     /// <summary>
+    /// How long the last recognizer took to load its model file.
+    /// </summary>
+    /// <remarks>
+    /// Measured here because here is where it happens. It is a fixed cost paid
+    /// once per transcription - hundreds of megabytes off a disk - and on a
+    /// short meeting it is a visible slice of the total, so leaving it out of
+    /// the breakdown would make every other number look worse than it is.
+    /// </remarks>
+    public TimeSpan LastModelLoadTime { get; private set; }
+
+    /// <summary>
+    /// The decoder settings the current profile asks for.
+    /// </summary>
+    /// <remarks>
+    /// Exposed separately from the recognizer so the metrics can record what was
+    /// asked for even when the recognizer could not be created, and so a test
+    /// can assert the profile actually reaches the engine.
+    /// </remarks>
+    public SpeechRecognitionOptions TranscriptionDecoding()
+    {
+        // Nothing is competing for the CPU: there is no capture running that
+        // this could disturb, so the recognizer gets the full recommended
+        // thread count.
+        var threads = Math.Max(
+            Settings.Profile?.SttThreads ?? 4,
+            CapabilityProbe.RecommendThreadCount(Environment.ProcessorCount));
+
+        return SpeechRecognitionOptions.For(Settings.TranscriptionProfile, threads, Settings.SttLanguage);
+    }
+
+    /// <summary>
     /// Loads the recognizer for the currently selected model, or returns null
     /// when no model is available. Never fabricates a recognizer: a missing
     /// model means "you cannot transcribe yet", not "show made-up text".
@@ -153,15 +184,12 @@ public sealed class AppServices : IDisposable
 
         try
         {
-            // Nothing is competing for the CPU: there is no capture running that
-            // this could disturb, so the recognizer gets the full recommended
-            // thread count.
-            var threads = Math.Max(
-                Settings.Profile?.SttThreads ?? 4,
-                CapabilityProbe.RecommendThreadCount(Environment.ProcessorCount));
-
-            var options = SpeechRecognitionOptions.Offline(threads, Settings.SttLanguage);
-            return new WhisperSpeechRecognizer(ModelStore.PathFor(descriptor), descriptor.Id, options, Logger);
+            var options = TranscriptionDecoding();
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var recognizer = new WhisperSpeechRecognizer(ModelStore.PathFor(descriptor), descriptor.Id, options, Logger);
+            clock.Stop();
+            LastModelLoadTime = clock.Elapsed;
+            return recognizer;
         }
         catch (OutOfMemoryException ex)
         {
@@ -192,6 +220,18 @@ public sealed class AppServices : IDisposable
     {
         if (Settings.Profile?.DiarizationEnabled != true || !Settings.DiarizationEnabled)
         {
+            return null;
+        }
+
+        // The fast profile means "skip what can be skipped", and clustering is
+        // the clearest example: it runs on every recognized span, it is measured
+        // separately for exactly this reason, and switching it off costs a
+        // colour in the transcript rather than a word. Which stream a segment
+        // came from is unaffected - that is read off the file it came out of,
+        // not inferred by anything.
+        if (Settings.TranscriptionProfile == TranscriptionProfile.Fast)
+        {
+            Logger.Info(nameof(AppServices), "Speaker clustering is off: the fast transcription profile is selected.");
             return null;
         }
 

@@ -45,6 +45,59 @@ public sealed class AudioProcessingSettings
     /// <summary>-3 dB point of the DC blocker, in Hz.</summary>
     public double DcBlockerCutoffHz { get; set; } = 20.0;
 
+    // ---- Listening EQ (meeting file, microphone leg only) ----------------
+
+    /// <summary>
+    /// Applies one fixed high shelf to the microphone leg of the meeting mix,
+    /// for a microphone that has the bandwidth but sounds duller than the
+    /// PC-audio leg beside it in the same file.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Off by default, and it should stay off until there is a reason. After
+    /// every recording <see cref="Audio.SpectralBalance"/> measures both
+    /// working-audio files and writes the comparison to the log; if the
+    /// microphone's 4-7 kHz band really does sit well below the PC audio's, that
+    /// measurement is the reason. Turning it on because a recording "sounds a
+    /// bit flat" is not.
+    /// </para>
+    /// <para>
+    /// It cannot help a device that never delivered the band. A 16 kHz endpoint
+    /// has nothing above 8 kHz to lift, and the capture-format block in the log
+    /// says so explicitly rather than letting an equalizer imply otherwise.
+    /// </para>
+    /// <para>
+    /// It never touches the 16 kHz working audio, and never touches the PC-audio
+    /// leg. See <see cref="Dsp.ListeningEq"/>.
+    /// </para>
+    /// </remarks>
+    public bool MicrophoneListeningEqEnabled { get; set; }
+
+    /// <summary>
+    /// Corner frequency of the microphone listening shelf, in Hz.
+    /// </summary>
+    /// <remarks>
+    /// 2.5 kHz. Consonant place-of-articulation cues start around 2 kHz and
+    /// sibilant energy runs to 8 kHz, so a shelf hinged here lifts the whole
+    /// region intelligibility is carried in while leaving the vowel formants -
+    /// and therefore the speaker's voice - where they were. A corner up at
+    /// 6 kHz would only add air; one down at 1 kHz would rebalance the voice
+    /// itself.
+    /// </remarks>
+    public double MicrophoneListeningEqCornerHz { get; set; } = 2500.0;
+
+    /// <summary>
+    /// Tilt of the microphone listening shelf, in dB.
+    /// </summary>
+    /// <remarks>
+    /// 4 dB, and deliberately at the small end. It is about the smallest tilt
+    /// that is clearly audible on speech, and the measurement it answers is a
+    /// difference of 6 dB or more, so it closes most of a real gap without
+    /// overshooting a marginal one. Anything larger starts to sound thin, and
+    /// nothing here is trying to make a meeting sound produced.
+    /// </remarks>
+    public double MicrophoneListeningEqGainDb { get; set; } = 4.0;
+
     // ---- Mixer -----------------------------------------------------------
 
     /// <summary>

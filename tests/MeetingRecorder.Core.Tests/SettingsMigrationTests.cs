@@ -208,4 +208,80 @@ public sealed class SettingsMigrationTests : IDisposable
         Assert.Equal(AppSettings.CurrentVersion, settings.Version);
         Assert.True(settings.SttEnabled);
     }
+
+    /// <summary>A settings.json from the build immediately before the speed profiles.</summary>
+    private const string VersionThreeSettings = """
+    {
+      "version": 3,
+      "setupCompleted": true,
+      "saveRoot": "C:\\Users\\test\\Documents\\MeetingRecorder",
+      "format": "Mp3",
+      "mp3BitrateKbps": 192,
+      "sttModelId": "whisper-small-q5_1",
+      "sttLanguage": "ja",
+      "sttEnabled": true,
+      "diarizationEnabled": true,
+      "minutesEnabled": true,
+      "keepRecognitionAudio": true
+    }
+    """;
+
+    [Fact]
+    public void AFileFromBeforeTheSpeedProfilesGetsTheBalancedDefault()
+    {
+        var path = Path.Combine(_root, "settings.json");
+        File.WriteAllText(path, VersionThreeSettings);
+
+        var settings = new SettingsStore(path).Load();
+
+        // The whole point of the change is to offer the choice, so an existing
+        // user lands on the new default and sees it in the settings window -
+        // rather than being left on the slowest setting where they would never
+        // learn the other two exist.
+        Assert.Equal(TranscriptionProfile.Balanced, settings.TranscriptionProfile);
+        Assert.Equal(MinutesGenerationMode.LocalLlm, settings.MinutesMode);
+        Assert.Equal(AppSettings.CurrentVersion, settings.Version);
+
+        // ...and nothing they did choose is lost on the way.
+        Assert.Equal("whisper-small-q5_1", settings.SttModelId);
+        Assert.Equal(RecordingFormat.Mp3, settings.Format);
+        Assert.Equal(192, settings.Mp3BitrateKbps);
+        Assert.True(settings.KeepRecognitionAudio);
+    }
+
+    [Fact]
+    public void TheMicrophoneListeningEqualizerStartsOffOnAnUpgrade()
+    {
+        // It corrects a spectral tilt, and whether this user's microphone has
+        // one is a measurement nobody has taken yet. Switching it on for
+        // everybody at upgrade time would be exactly the unfounded change the
+        // brief rules out.
+        var path = Path.Combine(_root, "settings.json");
+        File.WriteAllText(path, VersionThreeSettings);
+
+        var settings = new SettingsStore(path).Load();
+
+        Assert.False(settings.Processing.MicrophoneListeningEqEnabled);
+    }
+
+    [Fact]
+    public void ARoundTripKeepsTheNewSettings()
+    {
+        var path = Path.Combine(_root, "roundtrip.json");
+        var store = new SettingsStore(path);
+
+        var written = SettingsStore.CreateDefault();
+        written.TranscriptionProfile = TranscriptionProfile.Fast;
+        written.MinutesMode = MinutesGenerationMode.Extractive;
+        written.Processing.MicrophoneListeningEqEnabled = true;
+        written.Processing.MicrophoneListeningEqGainDb = 3.0;
+        store.Save(written);
+
+        var read = store.Load();
+
+        Assert.Equal(TranscriptionProfile.Fast, read.TranscriptionProfile);
+        Assert.Equal(MinutesGenerationMode.Extractive, read.MinutesMode);
+        Assert.True(read.Processing.MicrophoneListeningEqEnabled);
+        Assert.Equal(3.0, read.Processing.MicrophoneListeningEqGainDb);
+    }
 }

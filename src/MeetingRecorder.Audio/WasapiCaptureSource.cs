@@ -40,6 +40,8 @@ public abstract class WasapiCaptureSource : IAudioCaptureSource
     private IWaveIn? _capture;
     private MMDevice? _device;
     private Resampler? _resampler;
+    private MonoDownmixer? _downmixer;
+    private float[] _interleavedBuffer = Array.Empty<float>();
     private float[] _monoBuffer = Array.Empty<float>();
     private float[] _resampleBuffer = Array.Empty<float>();
     private int _sourceChannels;
@@ -70,6 +72,12 @@ public abstract class WasapiCaptureSource : IAudioCaptureSource
     public string? DeviceId { get; private set; }
 
     public bool IsCapturing { get; private set; }
+
+    /// <summary>
+    /// The format the endpoint actually delivered, recorded the moment the
+    /// stream opened. Null until then.
+    /// </summary>
+    public CaptureFormatReport? Format { get; private set; }
 
     public event AudioDataHandler? DataAvailable;
 
@@ -112,6 +120,11 @@ public abstract class WasapiCaptureSource : IAudioCaptureSource
         _sourceChannels = Math.Max(1, format.Channels);
         _resampler = new Resampler(format.SampleRate, _targetSampleRate);
 
+        _downmixer = new MonoDownmixer(_sourceChannels, format.SampleRate);
+        _downmixer.ModeChanged += message => _logger.Warn(GetType().Name, $"{DisplayLabel}: {message}");
+
+        Format = DescribeFormat(_device, format);
+
         capture.DataAvailable += OnDataAvailable;
         capture.RecordingStopped += OnRecordingStopped;
 
@@ -119,9 +132,50 @@ public abstract class WasapiCaptureSource : IAudioCaptureSource
         capture.StartRecording();
         IsCapturing = true;
 
-        _logger.Info(
-            GetType().Name,
-            $"Capture started on '{DeviceName}' ({format.SampleRate} Hz, {format.Channels} ch, {format.Encoding}) -> {_targetSampleRate} Hz mono.");
+        // The whole block, not a one-liner: when somebody reports that a
+        // recording sounds muffled, this is the evidence that says whether the
+        // endpoint was ever capable of more.
+        _logger.Info(GetType().Name, Environment.NewLine + Format.Value.ToLogBlock());
+
+        var warning = Format.Value.UserWarning;
+        if (warning is not null)
+        {
+            _logger.Warn(GetType().Name, warning);
+            RaiseFault(new CaptureFault(CaptureFaultKind.Unknown, warning, Recovered: true));
+        }
+    }
+
+    /// <summary>
+    /// Reads the endpoint's shared-mode mix format alongside the format the
+    /// capture object settled on. They are normally the same thing; when they
+    /// are not, the difference is the answer to a question somebody is about to
+    /// ask.
+    /// </summary>
+    private CaptureFormatReport DescribeFormat(MMDevice device, WaveFormat format)
+    {
+        var mixFormat = "unavailable";
+        try
+        {
+            var mix = device.AudioClient.MixFormat;
+            mixFormat = $"{mix.SampleRate} Hz / {mix.Channels} ch / {mix.BitsPerSample}-bit {mix.Encoding}";
+        }
+        catch (Exception ex)
+        {
+            // Reading the mix format opens an audio client, which can fail for
+            // the same reasons capture can. It is diagnostic detail, not the
+            // recording, so a failure here must cost nothing.
+            _logger.Debug(GetType().Name, $"Could not read the mix format of '{DeviceName}': {ex.Message}");
+        }
+
+        return new CaptureFormatReport(
+            Kind,
+            DeviceName,
+            format.SampleRate,
+            Math.Max(1, format.Channels),
+            format.BitsPerSample,
+            format.Encoding.ToString(),
+            mixFormat,
+            _targetSampleRate);
     }
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
@@ -171,6 +225,13 @@ public abstract class WasapiCaptureSource : IAudioCaptureSource
     }
 
     /// <summary>Converts an interleaved WASAPI buffer into <see cref="_monoBuffer"/>.</summary>
+    /// <remarks>
+    /// Decoding and mono conversion are two steps rather than one fused loop so
+    /// that <see cref="MonoDownmixer"/> can see the individual channels. It is
+    /// the only thing that can tell a stereo microphone apart from a
+    /// differential pair that averaging would silence, and one extra pass over
+    /// a 100 ms block is nothing next to getting that wrong.
+    /// </remarks>
     private int ConvertToMono(byte[] buffer, int byteCount, WaveFormat format)
     {
         var bytesPerSample = format.BitsPerSample / 8;
@@ -186,6 +247,12 @@ public abstract class WasapiCaptureSource : IAudioCaptureSource
             return 0;
         }
 
+        var interleavedCount = frames * _sourceChannels;
+        if (_interleavedBuffer.Length < interleavedCount)
+        {
+            _interleavedBuffer = new float[interleavedCount];
+        }
+
         if (_monoBuffer.Length < frames)
         {
             _monoBuffer = new float[frames];
@@ -194,19 +261,18 @@ public abstract class WasapiCaptureSource : IAudioCaptureSource
         var isFloat = format.Encoding == WaveFormatEncoding.IeeeFloat
                       || (format.Encoding == WaveFormatEncoding.Extensible && format.BitsPerSample == 32);
 
-        for (var frame = 0; frame < frames; frame++)
+        for (var i = 0; i < interleavedCount; i++)
         {
-            double sum = 0;
-            for (var channel = 0; channel < _sourceChannels; channel++)
-            {
-                var offset = ((frame * _sourceChannels) + channel) * bytesPerSample;
-                sum += ReadSample(buffer, offset, format.BitsPerSample, isFloat);
-            }
-
-            _monoBuffer[frame] = (float)(sum / _sourceChannels);
+            _interleavedBuffer[i] = (float)ReadSample(buffer, i * bytesPerSample, format.BitsPerSample, isFloat);
         }
 
-        return frames;
+        var downmixer = _downmixer;
+        if (downmixer is null)
+        {
+            return 0;
+        }
+
+        return downmixer.Process(_interleavedBuffer.AsSpan(0, interleavedCount), _monoBuffer);
     }
 
     private static double ReadSample(byte[] buffer, int offset, int bitsPerSample, bool isFloat) => bitsPerSample switch

@@ -204,6 +204,7 @@ public sealed class MeetingSessionManager : IDisposable
 
         var audioPath = result.AudioFilePath;
         NormalizeRecording(audioPath, warnings);
+        MeasureSpectralBalance(result.RecognitionAudioDirectory, warnings);
 
         if (_settings.Format == RecordingFormat.Mp3)
         {
@@ -279,6 +280,70 @@ public sealed class MeetingSessionManager : IDisposable
         {
             _logger.Error(nameof(MeetingSessionManager), "Peak normalization failed; the recording is unchanged.", ex);
             warnings.Add($"録音後の音量調整に失敗したため、録音した音量のまま保存しました（{ex.Message}）。");
+        }
+    }
+
+    /// <summary>
+    /// Measures how the two captured streams are distributed across the speech
+    /// band and writes the comparison to the log.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// "The microphone sounds muffled next to the PC audio" is a claim about
+    /// spectrum, and this turns it into a number. Both working files came
+    /// through the same pipeline at the same rate, so the same measurement
+    /// applied to each is directly comparable - and it costs nothing that
+    /// matters, because it runs here, after the recording is closed, over files
+    /// that are already on disk.
+    /// </para>
+    /// <para>
+    /// It reports and never corrects. Whether the difference is worth an
+    /// equalizer is a decision for the person listening, and
+    /// <see cref="AudioProcessingSettings.MicrophoneListeningEqEnabled"/> is
+    /// where they make it. A measurement that quietly changed a setting would be
+    /// the automatic gain control this application spent so much effort not
+    /// having.
+    /// </para>
+    /// </remarks>
+    private void MeasureSpectralBalance(string? recognitionDirectory, List<string> warnings)
+    {
+        if (string.IsNullOrWhiteSpace(recognitionDirectory))
+        {
+            return;
+        }
+
+        try
+        {
+            var micPath = Path.Combine(recognitionDirectory, RecognitionAudioNames.Microphone);
+            var systemPath = Path.Combine(recognitionDirectory, RecognitionAudioNames.SystemAudio);
+            if (!File.Exists(micPath) || !File.Exists(systemPath))
+            {
+                return;
+            }
+
+            var mic = SpectralBalance.Measure(micPath);
+            var system = SpectralBalance.Measure(systemPath);
+
+            _logger.Info(nameof(MeetingSessionManager), Environment.NewLine + mic.ToLogBlock("Microphone"));
+            _logger.Info(nameof(MeetingSessionManager), Environment.NewLine + system.ToLogBlock("PC audio"));
+
+            var message = SpectralBalance.DescribeDifference(mic, system, out var differenceDb);
+            if (message is null)
+            {
+                return;
+            }
+
+            _logger.Warn(
+                nameof(MeetingSessionManager),
+                $"Microphone high-band tilt is {differenceDb:F1} dB below the PC-audio leg's.");
+            warnings.Add(message);
+        }
+        catch (Exception ex)
+        {
+            // A diagnostic must never cost a meeting. Losing the measurement is
+            // an inconvenience; failing Stop() after the audio is safe on disk
+            // would not be.
+            _logger.Warn(nameof(MeetingSessionManager), $"Measuring the spectral balance reported: {ex.Message}");
         }
     }
 

@@ -108,6 +108,8 @@ public sealed class RecordingPipeline : IDisposable
     private DriftCompensator? _micDrift;
     private DriftCompensator? _systemDrift;
     private StreamMixer? _mixer;
+    private ListeningEq? _micListeningEq;
+    private float[] _micListeningBuffer = Array.Empty<float>();
     private Resampler? _micToRecognition;
     private Resampler? _systemToRecognition;
     private float[] _recognitionScratch = Array.Empty<float>();
@@ -206,6 +208,12 @@ public sealed class RecordingPipeline : IDisposable
 
     public string? AudioFilePath => _writer?.FilePath;
 
+    /// <summary>
+    /// What each endpoint actually delivered, filled in once capture has
+    /// started. Empty before then, and for fake sources that have no endpoint.
+    /// </summary>
+    public IReadOnlyList<CaptureFormatReport> CaptureFormats { get; private set; } = Array.Empty<CaptureFormatReport>();
+
     /// <summary>Non-fatal problems encountered during the recording, copied into metadata.json.</summary>
     public IReadOnlyList<string> Warnings
     {
@@ -273,6 +281,12 @@ public sealed class RecordingPipeline : IDisposable
         _micDrift = new DriftCompensator(rate, _options.JitterBufferSeconds);
         _systemDrift = new DriftCompensator(rate, _options.JitterBufferSeconds);
         _mixer = new StreamMixer(_options.Processing, rate);
+        _micListeningEq = _options.Processing.MicrophoneListeningEqEnabled
+            ? new ListeningEq(
+                rate,
+                _options.Processing.MicrophoneListeningEqCornerHz,
+                _options.Processing.MicrophoneListeningEqGainDb)
+            : null;
         _micToRecognition = new Resampler(rate, SpeechConstants.SampleRate);
         _systemToRecognition = new Resampler(rate, SpeechConstants.SampleRate);
         StartRecognitionCapture(recognitionAudioDirectory);
@@ -351,6 +365,8 @@ public sealed class RecordingPipeline : IDisposable
                 + "許可されているか、再生デバイスが有効かを確認してください。");
         }
 
+        RecordCaptureFormats();
+
         _logger.Info(nameof(RecordingPipeline), $"Recording started -> {audioFilePath}");
     }
 
@@ -396,6 +412,41 @@ public sealed class RecordingPipeline : IDisposable
 
             return false;
         }
+    }
+
+    /// <summary>
+    /// Files what each endpoint actually delivered, and warns when a device's
+    /// own bandwidth is the ceiling.
+    /// </summary>
+    /// <remarks>
+    /// The warning is the honest half of the microphone-clarity work. An
+    /// endpoint running at 16 kHz has already thrown away everything above
+    /// 8 kHz by the time the first callback fires; saying so up front is the
+    /// difference between a user changing a Windows setting and a user
+    /// concluding that the application is broken.
+    /// </remarks>
+    private void RecordCaptureFormats()
+    {
+        var formats = new List<CaptureFormatReport>(2);
+
+        foreach (var source in new[] { _micSource, _systemSource })
+        {
+            if (source?.Format is not { } format)
+            {
+                continue;
+            }
+
+            formats.Add(format);
+
+            var warning = format.UserWarning;
+            if (warning is not null)
+            {
+                AddWarning(warning);
+                _journal?.Note(warning);
+            }
+        }
+
+        CaptureFormats = formats;
     }
 
     /// <summary>Unwinds a start that could not produce a single working stream.</summary>
@@ -587,8 +638,43 @@ public sealed class RecordingPipeline : IDisposable
         WriteRecognitionAudio(_micToRecognition!, mic, _micRecognitionWriter);
         WriteRecognitionAudio(_systemToRecognition!, system, _systemRecognitionWriter);
 
-        _mixer!.Mix(mic, system, mix);
+        // The listening EQ, when it is on at all, goes here and only here:
+        // after the working audio has been written, so the recognizer never
+        // hears it, and on the microphone leg alone, so the PC-audio leg - which
+        // is not the leg anybody complained about - is bit-for-bit what it was.
+        var micForMix = ApplyListeningEq(mic);
+
+        _mixer!.Mix(micForMix, system, mix);
         _writer!.Write(mix);
+    }
+
+    /// <summary>
+    /// Returns the microphone block the mixer should see: the same span when no
+    /// listening EQ is configured, or a filtered copy when one is.
+    /// </summary>
+    /// <remarks>
+    /// A copy, not an in-place filter, because <paramref name="mic"/> is the
+    /// buffer the working audio was just written from and the two destinations
+    /// are not allowed to drift apart by accident. The allocation happens once,
+    /// at the first block; after that the scratch is reused.
+    /// </remarks>
+    private ReadOnlySpan<float> ApplyListeningEq(ReadOnlySpan<float> mic)
+    {
+        var eq = _micListeningEq;
+        if (eq is null)
+        {
+            return mic;
+        }
+
+        if (_micListeningBuffer.Length < mic.Length)
+        {
+            _micListeningBuffer = new float[mic.Length];
+        }
+
+        var target = _micListeningBuffer.AsSpan(0, mic.Length);
+        mic.CopyTo(target);
+        eq.Process(target);
+        return target;
     }
 
     /// <summary>
@@ -844,7 +930,7 @@ public sealed class RecordingPipeline : IDisposable
         ReportCaptureGaps(duration);
 
         _logger.Info(nameof(RecordingPipeline), $"Recording stopped after {duration:hh\\:mm\\:ss} -> {path}");
-        return new RecordingResult(path, duration, Warnings, recognitionDirectory);
+        return new RecordingResult(path, duration, Warnings, recognitionDirectory, CaptureFormats);
     }
 
     /// <summary>
@@ -948,8 +1034,14 @@ public sealed class RecordingPipeline : IDisposable
 /// Where the per-stream working audio was kept, or null when it was not. This
 /// is what a later transcription reads.
 /// </param>
+/// <param name="CaptureFormats">
+/// What each endpoint actually delivered. The evidence behind any claim about
+/// audio quality, and the reason a device's own band limit is never confused
+/// with something this application did.
+/// </param>
 public sealed record RecordingResult(
     string AudioFilePath,
     TimeSpan Duration,
     IReadOnlyList<string> Warnings,
-    string? RecognitionAudioDirectory = null);
+    string? RecognitionAudioDirectory = null,
+    IReadOnlyList<CaptureFormatReport>? CaptureFormats = null);

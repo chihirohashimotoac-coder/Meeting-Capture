@@ -73,6 +73,21 @@ public static class SpeechDecodingDefaults
     /// it and nothing on the rest.
     /// </summary>
     public const float TemperatureIncrement = 0.2f;
+
+    /// <summary>
+    /// Beam width for the balanced profile.
+    /// </summary>
+    /// <remarks>
+    /// Two, not three. A beam search's cost tracks the beam almost linearly
+    /// while its benefit falls away fast, so the interesting question is where
+    /// the first step off greedy sits - and going from one hypothesis to two is
+    /// where a decoder stops being unable to recover from a single bad token at
+    /// all. Three would cost half again as much for the part of the curve that
+    /// has already flattened. It is a starting point for a measurement, not a
+    /// finding: nothing in this repository has measured Japanese character error
+    /// rate against beam width, and nothing here claims to have.
+    /// </remarks>
+    public const int BalancedBeamSize = 2;
 }
 
 /// <summary>
@@ -109,12 +124,59 @@ public readonly record struct SpeechRecognitionOptions(
     /// </summary>
     public const string JapaneseMeetingPrompt = "以下は会議の日本語の音声です。句読点を付けて書き起こします。";
 
-    /// <summary>Decoding for the offline pass: the only pass there is.</summary>
-    public static SpeechRecognitionOptions Offline(int threads, string language) => new(
-        threads,
-        BeamSize: SpeechDecodingDefaults.BeamSize,
-        InitialPrompt: PromptFor(language),
-        TemperatureIncrement: SpeechDecodingDefaults.TemperatureIncrement);
+    /// <summary>
+    /// Decoding for the offline pass at the profile the user chose.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The three settings are the same decoder walked at three widths. Beam
+    /// search explores <c>BeamSize</c> hypotheses in parallel and keeps the best
+    /// scoring one, so its cost is close to linear in the beam and its benefit
+    /// is not: most of what a beam of five finds over a beam of two is found on
+    /// the passages a beam of two already had no trouble with. Temperature
+    /// fallback re-decodes a window whisper's own heuristics call degenerate,
+    /// which costs time only on the windows that need it - and is exactly what
+    /// stops a hard passage coming back as a loop of the same phrase.
+    /// </para>
+    /// <para>
+    /// <see cref="TranscriptionProfile.Accurate"/> reproduces
+    /// <see cref="SpeechDecodingDefaults"/> exactly. That is the point of it:
+    /// the behaviour that existed before this method did is still reachable, and
+    /// a test asserts the two agree.
+    /// </para>
+    /// <para>
+    /// These are widths, not accuracy claims. Which one is right for a given
+    /// meeting is a measurement. The application logs one after every run and
+    /// <c>tools/Show-Performance.ps1</c> tabulates them, so it gets measured on
+    /// real audio rather than argued about here.
+    /// </para>
+    /// </remarks>
+    public static SpeechRecognitionOptions For(TranscriptionProfile profile, int threads, string language) => profile switch
+    {
+        TranscriptionProfile.Fast => new SpeechRecognitionOptions(
+            threads,
+            BeamSize: 1,
+            InitialPrompt: PromptFor(language),
+            TemperatureIncrement: 0f),
+
+        TranscriptionProfile.Accurate => new SpeechRecognitionOptions(
+            threads,
+            BeamSize: SpeechDecodingDefaults.BeamSize,
+            InitialPrompt: PromptFor(language),
+            TemperatureIncrement: SpeechDecodingDefaults.TemperatureIncrement),
+
+        // Balanced, and anything unrecognised: the middle is the safe place for
+        // a value that came from a settings file somebody edited by hand.
+        _ => new SpeechRecognitionOptions(
+            threads,
+            BeamSize: SpeechDecodingDefaults.BalancedBeamSize,
+            InitialPrompt: PromptFor(language),
+            TemperatureIncrement: SpeechDecodingDefaults.TemperatureIncrement),
+    };
+
+    /// <summary>Decoding for the offline pass at the historical accurate settings.</summary>
+    public static SpeechRecognitionOptions Offline(int threads, string language)
+        => For(TranscriptionProfile.Accurate, threads, language);
 
     private static string? PromptFor(string language)
         => string.IsNullOrWhiteSpace(language) || language.StartsWith("ja", StringComparison.OrdinalIgnoreCase)
