@@ -64,6 +64,20 @@ FRAME_MS = 20
 CHUNK_FRAMES = 1 << 16
 
 
+def _make_output_robust() -> None:
+    """Never let an encoding fault hide a measurement.
+
+    These scripts print Japanese labels. A Windows console whose code page
+    cannot represent them would otherwise raise UnicodeEncodeError midway
+    through a report - losing the numbers over a question of glyphs. Replacing
+    the unprintable characters keeps the numbers. For readable Japanese on
+    Windows, run `chcp 65001` and set PYTHONIOENCODING=utf-8 first.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
+
 def dbfs(amplitude: float) -> float:
     """Level in dBFS, floored so that silence prints instead of raising."""
     return 20.0 * math.log10(amplitude / FULL_SCALE) if amplitude > 0 else -float("inf")
@@ -468,6 +482,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    _make_output_robust()
     return args.func(args)
 
 

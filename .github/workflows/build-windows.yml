@@ -90,6 +90,9 @@ jobs:
           # tools/cer.py and tools/wav_quality.py produce the numbers that go
           # into a test report (docs/FIELD_TEST_JA.md). A measurement tool that
           # is quietly wrong is worse than none, so their self-tests run here.
+          # UTF-8 output so a failure message with Japanese in it survives the
+          # runner's console code page.
+          $env:PYTHONIOENCODING = "utf-8"
           python tools/cer.py selftest
           python tools/wav_quality.py selftest
 

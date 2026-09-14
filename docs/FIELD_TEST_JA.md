@@ -34,6 +34,14 @@ python3 tools/cer.py selftest
 python3 tools/wav_quality.py selftest
 ```
 
+Windows で実行する場合、出力の日本語が文字化けするときは先に次を実行してください
+（文字化けしても数値は失われませんが、読みにくくなります）。
+
+```powershell
+chcp 65001
+$env:PYTHONIOENCODING = "utf-8"
+```
+
 ---
 
 ## 1. 目的

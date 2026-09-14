@@ -60,6 +60,20 @@ PUNCTUATION = frozenset(
 SLOW_BAND = 2000
 
 
+def _make_output_robust() -> None:
+    """Never let an encoding fault hide a measurement.
+
+    These scripts print Japanese labels. A Windows console whose code page
+    cannot represent them would otherwise raise UnicodeEncodeError midway
+    through a report - losing the numbers over a question of glyphs. Replacing
+    the unprintable characters keeps the numbers. For readable Japanese on
+    Windows, run `chcp 65001` and set PYTHONIOENCODING=utf-8 first.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
+
 def normalize(text: str) -> str:
     """Applies section 8's normalisation and returns the string to be scored."""
     text = unicodedata.normalize("NFKC", text)
@@ -450,6 +464,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("selftest", help="verify this script against known values").set_defaults(func=cmd_selftest)
 
     args = parser.parse_args(argv)
+    _make_output_robust()
     return args.func(args)
 
 
