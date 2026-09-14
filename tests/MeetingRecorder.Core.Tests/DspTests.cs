@@ -439,11 +439,10 @@ public class ResamplerTests
 public class StreamMixerTests
 {
     [Fact]
-    public void TwoFullScaleStreamsSumToExactlyFullScaleAndNeverBeyond()
+    public void TwoFullScaleStreamsStayInsideFullScale()
     {
         // The mixer's only job beyond the sum: make clipping arithmetically
-        // impossible without a limiter and without a clamp. At -6.02 dB per leg,
-        // 1.0 + 1.0 lands on 1.0 - the worst case there is.
+        // impossible without a limiter and without a clamp.
         var settings = new AudioProcessingSettings();
         var mixer = new StreamMixer(settings, 48000);
 
@@ -454,7 +453,27 @@ public class StreamMixerTests
         mixer.Mix(mic, system, mix);
 
         Assert.True(AudioMath.Peak(mix) <= 1.0 + 1e-6, $"peak {AudioMath.Peak(mix)} exceeded full scale");
-        Assert.InRange(AudioMath.Peak(mix), 0.99, 1.0 + 1e-6);
+    }
+
+    [Fact]
+    public void TheHeadroomCoversWhatTheResamplerCanHandTheMixer()
+    {
+        // The worst case is not two full-scale legs. It is two legs that have
+        // each been through the cubic interpolator, which can overshoot to
+        // Resampler.MaximumInterpolationGain - and the mixer constant is derived
+        // from exactly that, so this is the sum it has to survive.
+        var mixer = new StreamMixer(new AudioProcessingSettings(), 48000);
+
+        var worstCase = (float)Resampler.MaximumInterpolationGain;
+        var mic = Enumerable.Repeat(worstCase, 128).ToArray();
+        var system = Enumerable.Repeat(worstCase, 128).ToArray();
+        var mix = new float[mic.Length];
+
+        mixer.Mix(mic, system, mix);
+
+        Assert.True(
+            AudioMath.Peak(mix) <= 1.0 + 1e-6,
+            $"two overshooting legs summed to {AudioMath.Peak(mix):F4}, which the writer would have to clamp");
     }
 
     [Fact]

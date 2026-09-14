@@ -51,6 +51,19 @@ public interface IAudioCaptureSource : IDisposable
 
     bool IsCapturing { get; }
 
+    /// <summary>
+    /// What the endpoint actually delivered, once it has been opened, or null
+    /// before <see cref="Start"/> and for sources that have no real endpoint.
+    /// </summary>
+    /// <remarks>
+    /// A default implementation, rather than a required member, because the
+    /// test fakes are not endpoints and have no format to report. The value
+    /// matters for exactly one question - whether a "muffled" recording is the
+    /// device's own bandwidth or something this application did - and only a
+    /// real endpoint can answer it.
+    /// </remarks>
+    CaptureFormatReport? Format => null;
+
     event AudioDataHandler? DataAvailable;
 
     event EventHandler<CaptureFault>? Fault;

@@ -168,6 +168,34 @@ public partial class SettingsWindow : Window
         DeleteRecognitionAudioAfterTranscription = DeleteRecognitionAudioCheck?.IsChecked == true,
     };
 
+    private void OnTranscriptionProfileChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        => UpdateTranscriptionProfileText();
+
+    private void OnMinutesModeChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        => UpdateMinutesModeText();
+
+    private void UpdateTranscriptionProfileText()
+    {
+        if (TranscriptionProfileText is null || TranscriptionProfileCombo?.SelectedItem is not ProfileRow row)
+        {
+            return;
+        }
+
+        TranscriptionProfileText.Text = TranscriptionProfiles.Description(row.Profile);
+    }
+
+    private void UpdateMinutesModeText()
+    {
+        if (MinutesModeText is null || MinutesModeCombo?.SelectedItem is not MinutesModeRow row)
+        {
+            return;
+        }
+
+        MinutesModeText.Text = row.Mode == MinutesGenerationMode.Extractive
+            ? "文字起こしから重要な発言をそのまま抜き出します。数秒で終わり、書かれていないことを書くことはありません。要約や言い換えは行いません。"
+            : "ローカルLLMが要約します。文字起こしがモデルのコンテキスト長に収まる場合は1回の推論で全セクションを生成し、収まらない場合のみブロックに分割します。";
+    }
+
     private void LoadValues()
     {
         var settings = _services.Settings;
@@ -186,6 +214,32 @@ public partial class SettingsWindow : Window
         AutoSaveRecordingCheck.IsChecked = settings.AutoSaveRecordings;
         MicMutedCheck.IsChecked = settings.MicrophoneMuted;
         SystemMutedCheck.IsChecked = settings.SystemAudioMuted;
+        MicListeningEqCheck.IsChecked = settings.Processing.MicrophoneListeningEqEnabled;
+        MicListeningEqText.Text =
+            $"高域シェルビング: {settings.Processing.MicrophoneListeningEqCornerHz:F0} Hz より上を "
+            + $"{settings.Processing.MicrophoneListeningEqGainDb:F0} dB 持ち上げる形の一定フィルターです"
+            + "（実際には全体を下げて相対的に高域を残すため、クリップは発生しません）。"
+            + "時間で変化する処理は一切含みません。";
+
+        TranscriptionProfileCombo.ItemsSource = TranscriptionProfiles.All
+            .Select(p => new ProfileRow(p, TranscriptionProfiles.DisplayName(p)))
+            .ToList();
+        // Balanced when the stored value is not one this build knows: a settings
+        // file can be hand-edited, or written by a later version.
+        var profileIndex = TranscriptionProfiles.All.ToList().IndexOf(settings.TranscriptionProfile);
+        TranscriptionProfileCombo.SelectedIndex = profileIndex >= 0
+            ? profileIndex
+            : TranscriptionProfiles.All.ToList().IndexOf(TranscriptionProfile.Balanced);
+        UpdateTranscriptionProfileText();
+
+        MinutesModeCombo.ItemsSource = new List<MinutesModeRow>
+        {
+            new(MinutesGenerationMode.LocalLlm, "標準（ローカルLLM）"),
+            new(MinutesGenerationMode.Extractive, "高速（抽出型・LLMを使わない）"),
+        };
+        MinutesModeCombo.SelectedIndex = settings.MinutesMode == MinutesGenerationMode.Extractive ? 1 : 0;
+        UpdateMinutesModeText();
+
         UpdateModelEstimateText();
 
         Mp3BitrateCombo.ItemsSource = AppSettings.Mp3Bitrates.Select(k => $"{k} kbps").ToList();
@@ -422,6 +476,17 @@ public partial class SettingsWindow : Window
         settings.AutoSaveRecordings = AutoSaveRecordingCheck.IsChecked == true;
         settings.MicrophoneMuted = MicMutedCheck.IsChecked == true;
         settings.SystemAudioMuted = SystemMutedCheck.IsChecked == true;
+        settings.Processing.MicrophoneListeningEqEnabled = MicListeningEqCheck.IsChecked == true;
+
+        if (TranscriptionProfileCombo.SelectedItem is ProfileRow profileRow)
+        {
+            settings.TranscriptionProfile = profileRow.Profile;
+        }
+
+        if (MinutesModeCombo.SelectedItem is MinutesModeRow minutesRow)
+        {
+            settings.MinutesMode = minutesRow.Mode;
+        }
 
         if (int.TryParse(AutoSaveBox.Text, out var interval))
         {

@@ -98,6 +98,12 @@
 
                         <TextBlock x:Name="ProfileText" Style="{StaticResource CaptionText}" Margin="0,0,0,18" />
 
+                        <TextBlock Text="処理速度と精度" Style="{StaticResource SectionHeader}" />
+                        <ComboBox x:Name="TranscriptionProfileCombo" Margin="0,0,0,6"
+                                  DisplayMemberPath="Label"
+                                  SelectionChanged="OnTranscriptionProfileChanged" />
+                        <TextBlock x:Name="TranscriptionProfileText" Style="{StaticResource CaptionText}" Margin="0,0,0,18" />
+
                         <Border Style="{StaticResource InsetCard}" CornerRadius="8" Padding="14,12">
                             <StackPanel>
                                 <CheckBox x:Name="KeepRecognitionAudioCheck" Margin="0,0,0,6"
@@ -111,6 +117,21 @@
                                            Style="{StaticResource CaptionText}" Margin="56,0,0,0" />
                             </StackPanel>
                         </Border>
+                    </StackPanel>
+                </Border>
+
+                <!-- Microphone clarity -->
+                <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                    <StackPanel>
+                        <TextBlock Text="マイクの明瞭度" Style="{StaticResource GroupHeader}" />
+                        <TextBlock Text="視聴用の会議音声（meeting.mp3 / meeting.wav）のマイク側だけに、固定の高域シェルビングを適用します。文字起こし用の音声には適用しません。"
+                                   Style="{StaticResource CaptionText}" Margin="0,0,0,16" />
+
+                        <CheckBox x:Name="MicListeningEqCheck" Margin="0,0,0,6"
+                                  Content="マイク音声に明瞭度補正を適用する（既定: オフ）" />
+                        <TextBlock x:Name="MicListeningEqText" Style="{StaticResource CaptionText}" Margin="28,0,0,10" />
+                        <TextBlock Text="根拠なく有効にしないでください。録音を停止するたびに、マイクとPC内部音声の帯域バランスをログへ記録しています。マイクの高域がPC内部音声より 6 dB 以上少ないと記録された場合にのみ、この補正が意味を持ちます。マイクデバイス自体のサンプルレートが低い場合は、失われた帯域は補正できません（ログの Microphone capture format を確認してください）。"
+                                   Style="{StaticResource CaptionText}" Margin="28,0,0,0" />
                     </StackPanel>
                 </Border>
 
@@ -128,6 +149,12 @@
 
                         <CheckBox x:Name="MinutesCheck" Margin="0,0,0,16"
                                   Content="ローカルLLMによる議事録生成を有効にする（録音停止後に手動実行）" />
+
+                        <TextBlock Text="議事録の生成方法" Style="{StaticResource SectionHeader}" />
+                        <ComboBox x:Name="MinutesModeCombo" Margin="0,0,0,6"
+                                  DisplayMemberPath="Label"
+                                  SelectionChanged="OnMinutesModeChanged" />
+                        <TextBlock x:Name="MinutesModeText" Style="{StaticResource CaptionText}" Margin="0,0,0,16" />
 
                         <TextBlock Text="議事録生成に使用するモデル" Style="{StaticResource SectionHeader}" />
                         <ComboBox x:Name="LlmCombo" DisplayMemberPath="Label" Margin="0,0,0,12" />

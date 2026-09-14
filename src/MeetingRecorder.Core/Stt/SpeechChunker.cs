@@ -41,6 +41,8 @@ public sealed class SpeechChunker
     private readonly int _minSamples;
     private readonly int _silenceFlushFrames;
     private readonly int _overlapSamples;
+    private readonly int _targetSamples;
+    private readonly int _maxCarriedSilenceFrames;
     private readonly List<float> _frameBuffer = new();
 
     private int _preRollCount;
@@ -49,7 +51,26 @@ public sealed class SpeechChunker
     private long _pendingStartMs = -1;
     private long _consumedSamples;
     private long _sequence;
+    private long _speechFrames;
+    private long _emittedSamples;
 
+    /// <param name="source">Capture stream this chunker is fed from.</param>
+    /// <param name="maxChunkSeconds">Hard ceiling on one chunk.</param>
+    /// <param name="minChunkSeconds">Below this, a silence never ends a chunk.</param>
+    /// <param name="preRollMs">Audio kept from before the onset.</param>
+    /// <param name="silenceFlushMs">Silence that marks a place a chunk may end.</param>
+    /// <param name="overlapMs">Tail replayed when a chunk had to be cut for length.</param>
+    /// <param name="vad">Voice activity detector; a default one is built when null.</param>
+    /// <param name="targetChunkSeconds">
+    /// Fill this much before a silence is allowed to end a chunk. Zero keeps the
+    /// old behaviour of ending at the first silence past
+    /// <paramref name="minChunkSeconds"/>.
+    /// </param>
+    /// <param name="maxCarriedSilenceMs">
+    /// How much silence a half-full chunk will sit through before giving up and
+    /// emitting anyway. Zero means "no limit", which is only safe when
+    /// <paramref name="targetChunkSeconds"/> is zero too.
+    /// </param>
     public SpeechChunker(
         AudioSourceKind source,
         double maxChunkSeconds = 8.0,
@@ -57,7 +78,9 @@ public sealed class SpeechChunker
         double preRollMs = 300,
         double silenceFlushMs = 700,
         double overlapMs = 400,
-        EnergyVad? vad = null)
+        EnergyVad? vad = null,
+        double targetChunkSeconds = 0.0,
+        double maxCarriedSilenceMs = 0.0)
     {
         _source = source;
         _vad = vad ?? new EnergyVad();
@@ -67,7 +90,20 @@ public sealed class SpeechChunker
         _minSamples = (int)(SpeechConstants.SampleRate * minChunkSeconds);
         _silenceFlushFrames = Math.Max(1, (int)(silenceFlushMs / 1000.0 * SpeechConstants.SampleRate / _vad.FrameSamples));
         _overlapSamples = (int)(SpeechConstants.SampleRate * overlapMs / 1000.0);
+        _targetSamples = Math.Min(_maxSamples, (int)(SpeechConstants.SampleRate * Math.Max(0.0, targetChunkSeconds)));
+        _maxCarriedSilenceFrames = maxCarriedSilenceMs > 0
+            ? Math.Max(_silenceFlushFrames, (int)(maxCarriedSilenceMs / 1000.0 * SpeechConstants.SampleRate / _vad.FrameSamples))
+            : int.MaxValue;
     }
+
+    /// <summary>Audio the detector classified as speech, in seconds.</summary>
+    public double SpeechSeconds => _speechFrames * _vad.FrameSamples / (double)SpeechConstants.SampleRate;
+
+    /// <summary>Audio actually handed out in chunks, in seconds. What a recognizer is asked to read.</summary>
+    public double EmittedSeconds => _emittedSamples / (double)SpeechConstants.SampleRate;
+
+    /// <summary>Chunks emitted so far.</summary>
+    public long ChunkCount => _sequence;
 
     public bool IsSpeechActive => _vad.IsSpeech;
 
@@ -93,6 +129,7 @@ public sealed class SpeechChunker
 
             if (isSpeech)
             {
+                _speechFrames++;
                 if (!wasSpeech && _pending.Count == 0)
                 {
                     // Start a new utterance with the pre-roll so the onset is intact.
@@ -118,7 +155,23 @@ public sealed class SpeechChunker
             _consumedSamples += frame.Length;
             _frameBuffer.Clear();
 
-            var flushForSilence = _pending.Count >= _minSamples && _silenceFrames >= _silenceFlushFrames;
+            // A silence is a place a chunk *may* end, not a place it must. Whisper
+            // pads whatever it is given out to its own 30 second window before the
+            // encoder runs, so a two second chunk and a twenty-seven second chunk
+            // cost the encoder the same; ending at every pause turns a ten minute
+            // meeting into far more encoder passes than it has audio for. So the
+            // chunk keeps filling across pauses until it holds _targetSamples, and
+            // only then does the next silence close it - which is both the cheaper
+            // and the more accurate choice, because whisper was trained on long
+            // windows.
+            var atSilence = _silenceFrames >= _silenceFlushFrames;
+            var full = _pending.Count >= Math.Max(_minSamples, _targetSamples);
+            var waitedLongEnough = _silenceFrames >= _maxCarriedSilenceFrames;
+
+            // ...but a chunk must not sit there collecting silence forever. Once
+            // the pause is clearly not a pause any more, emit what there is
+            // rather than pad the recognizer's input with nothing.
+            var flushForSilence = atSilence && _pending.Count >= _minSamples && (full || waitedLongEnough);
             var flushForLength = _pending.Count >= _maxSamples;
 
             if (flushForSilence || flushForLength)
@@ -164,7 +217,10 @@ public sealed class SpeechChunker
             return null;
         }
 
+        TrimCarriedSilence();
+
         var samples = _pending.ToArray();
+        _emittedSamples += samples.Length;
         var startMs = _pendingStartMs < 0 ? 0 : _pendingStartMs;
         var chunk = new SpeechChunk(startMs, samples, _source, _sequence++);
 
@@ -184,6 +240,41 @@ public sealed class SpeechChunker
         }
 
         return chunk;
+    }
+
+    /// <summary>
+    /// Drops the silence a chunk sat through beyond what it needs to end
+    /// cleanly.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Only the tail, and only the excess: <c>silenceFlushMs</c> worth stays, on
+    /// top of the detector's own hang-over, so a trailing particle or the decay
+    /// of the last vowel is still inside the chunk. What goes is the extra
+    /// seconds a chunk collected while waiting to see whether somebody was going
+    /// to keep talking.
+    /// </para>
+    /// <para>
+    /// Trimming the tail cannot move anything: every timestamp a recognizer
+    /// returns is relative to the start of the chunk, and the start is where it
+    /// was. Leaving the silence in would cost nothing in accuracy either - it
+    /// would simply hand whisper seconds of nothing to think about, which is one
+    /// of the conditions it is known to fill in with invented text.
+    /// </para>
+    /// </remarks>
+    private void TrimCarriedSilence()
+    {
+        var excessFrames = _silenceFrames - _silenceFlushFrames;
+        if (excessFrames <= 0)
+        {
+            return;
+        }
+
+        var excessSamples = Math.Min(excessFrames * _vad.FrameSamples, Math.Max(0, _pending.Count - _minSamples));
+        if (excessSamples > 0)
+        {
+            _pending.RemoveRange(_pending.Count - excessSamples, excessSamples);
+        }
     }
 
     private void PushPreRoll(ReadOnlySpan<float> frame)
@@ -235,5 +326,7 @@ public sealed class SpeechChunker
         _silenceFrames = 0;
         _pendingStartMs = -1;
         _consumedSamples = 0;
+        _speechFrames = 0;
+        _emittedSamples = 0;
     }
 }

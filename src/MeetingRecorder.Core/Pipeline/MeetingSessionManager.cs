@@ -204,6 +204,8 @@ public sealed class MeetingSessionManager : IDisposable
 
         var audioPath = result.AudioFilePath;
         NormalizeRecording(audioPath, warnings);
+        ReportCaptureClipping(result.Clipping, warnings);
+        MeasureSpectralBalance(result.RecognitionAudioDirectory, warnings);
 
         if (_settings.Format == RecordingFormat.Mp3)
         {
@@ -264,21 +266,114 @@ public sealed class MeetingSessionManager : IDisposable
         {
             var result = PeakNormalizer.Normalize(audioPath, _settings!.Processing, _logger, _writerFactory);
             _metadata!.AppliedGainDb = result.Applied ? result.GainDb : null;
-            _metadata.SourceClipped = result.Scan.IsClipped;
-
-            if (result.Scan.IsClipped)
-            {
-                // Say what happened rather than pretend it was fixed: the peaks
-                // were flattened before this application ever saw them.
-                warnings.Add(
-                    $"入力音声が録音時点で既に歪んでいます（全体の {result.Scan.ClippedFraction * 100:F2}% が最大振幅）。"
-                    + "後処理では復元できません。マイクの入力レベルや再生音量を下げて録音し直してください。");
-            }
         }
         catch (Exception ex)
         {
             _logger.Error(nameof(MeetingSessionManager), "Peak normalization failed; the recording is unchanged.", ex);
             warnings.Add($"録音後の音量調整に失敗したため、録音した音量のまま保存しました（{ex.Message}）。");
+        }
+    }
+
+    /// <summary>
+    /// Says so when the input arrived already over-driven.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This used to be read off the finished file, and it only ever fired
+    /// because two full-scale legs at the mixer's old constant summed to exactly
+    /// full scale. That was arithmetic luck rather than detection: one clipped
+    /// leg, or two clipped legs out of phase, produced a mix nowhere near full
+    /// scale and went unreported - and changing the constant for any reason
+    /// would have silently switched the warning off altogether.
+    /// </para>
+    /// <para>
+    /// It is now counted on each leg as it arrives, before any gain is applied,
+    /// which is where the evidence actually is. Nothing here claims the
+    /// flattened peaks can be recovered; they cannot, and saying so is the
+    /// entire point of the warning.
+    /// </para>
+    /// </remarks>
+    private void ReportCaptureClipping(CaptureClipping clipping, List<string> warnings)
+    {
+        _metadata!.SourceClipped = clipping.IsClipped;
+        if (!clipping.IsClipped)
+        {
+            return;
+        }
+
+        var leg = clipping.MicrophoneSamples >= clipping.SystemAudioSamples ? "マイク" : "PC内部音声";
+
+        _logger.Warn(
+            nameof(MeetingSessionManager),
+            $"Captured audio arrived clipped: microphone {clipping.MicrophoneSamples}, "
+            + $"system {clipping.SystemAudioSamples} of {clipping.SamplesPerLeg} samples per leg.");
+
+        warnings.Add(
+            $"入力音声が録音時点で既に歪んでいます（{leg}の {clipping.WorstFraction * 100:F2}% が最大振幅）。"
+            + "後処理では復元できません。マイクの入力レベルや再生音量を下げて録音し直してください。");
+    }
+
+    /// <summary>
+    /// Measures how the two captured streams are distributed across the speech
+    /// band and writes the comparison to the log.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// "The microphone sounds muffled next to the PC audio" is a claim about
+    /// spectrum, and this turns it into a number. Both working files came
+    /// through the same pipeline at the same rate, so the same measurement
+    /// applied to each is directly comparable - and it costs nothing that
+    /// matters, because it runs here, after the recording is closed, over files
+    /// that are already on disk.
+    /// </para>
+    /// <para>
+    /// It reports and never corrects. Whether the difference is worth an
+    /// equalizer is a decision for the person listening, and
+    /// <see cref="AudioProcessingSettings.MicrophoneListeningEqEnabled"/> is
+    /// where they make it. A measurement that quietly changed a setting would be
+    /// the automatic gain control this application spent so much effort not
+    /// having.
+    /// </para>
+    /// </remarks>
+    private void MeasureSpectralBalance(string? recognitionDirectory, List<string> warnings)
+    {
+        if (string.IsNullOrWhiteSpace(recognitionDirectory))
+        {
+            return;
+        }
+
+        try
+        {
+            var micPath = Path.Combine(recognitionDirectory, RecognitionAudioNames.Microphone);
+            var systemPath = Path.Combine(recognitionDirectory, RecognitionAudioNames.SystemAudio);
+            if (!File.Exists(micPath) || !File.Exists(systemPath))
+            {
+                return;
+            }
+
+            var mic = SpectralBalance.Measure(micPath);
+            var system = SpectralBalance.Measure(systemPath);
+
+            _logger.Info(nameof(MeetingSessionManager), Environment.NewLine + mic.ToLogBlock("Microphone"));
+            _logger.Info(nameof(MeetingSessionManager), Environment.NewLine + system.ToLogBlock("PC audio"));
+
+            var message = SpectralBalance.DescribeDifference(mic, system, out var differenceDb);
+            if (message is null)
+            {
+                return;
+            }
+
+            _logger.Warn(
+                nameof(MeetingSessionManager),
+                $"Microphone high-band tilt is {differenceDb:F1} dB below the PC-audio leg's.");
+            warnings.Add(message);
+        }
+        catch (Exception ex)
+        {
+            // A diagnostic must never cost a meeting. Losing the measurement is
+            // an inconvenience; failing Stop() after the audio is safe on disk
+            // would not be.
+            _logger.Warn(nameof(MeetingSessionManager), $"Measuring the spectral balance reported: {ex.Message}");
         }
     }
 

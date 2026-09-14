@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using LLama;
 using LLama.Common;
@@ -20,17 +21,24 @@ namespace MeetingRecorder.Minutes;
 /// result falls back to <see cref="ExtractiveMinutesGenerator"/> and says so in
 /// the document.</para>
 ///
-/// <para><b>Map-reduce, not one giant prompt.</b> An hour of Japanese meeting
-/// speech is far more text than a 1.5B model handles well in one pass on a CPU.
-/// The transcript is summarised block by block (the "map" phase, where progress
-/// is genuinely measurable), and only those summaries are fed into the four
-/// section prompts.</para>
+/// <para><b>One inference when one will do.</b> This used to summarise the
+/// transcript in 1500-character blocks and then run four more prompts over the
+/// digest - N + 4 inferences for every meeting, however short. For a ten minute
+/// meeting that is several decodes of a few hundred tokens each to condense
+/// something that fits in the context window whole, and on a CPU it is the
+/// decoding that costs. So the transcript is now measured with the model's own
+/// tokenizer (<see cref="MinutesPlanner"/>) and, when it fits, one prompt
+/// produces all six sections. When it does not fit, the map phase is still
+/// there - and the four section prompts have become a single structured reduce,
+/// so the count is N + 1 rather than N + 4.</para>
 ///
-/// <para><b>The prompt forbids invention.</b> The system message states that
-/// nothing outside the transcript may be written and that unknown owners and due
-/// dates must be "要確認". The final document is then assembled by
-/// <see cref="MinutesTemplate"/> rather than taken verbatim from the model, so
-/// the required six sections exist even when the model rambles.</para>
+/// <para><b>Nothing about the output changed.</b> The same six sections in the
+/// same order, assembled by <see cref="MinutesTemplate"/> rather than taken
+/// verbatim from the model, so they exist even when the model rambles. The
+/// system message still forbids inventing anything the transcript does not
+/// state, and unknown owners and due dates are still 要確認 rather than a
+/// plausible guess. <see cref="MinutesResponseParser"/> is written so that a
+/// malformed response costs at most one section, never the document.</para>
 /// </remarks>
 public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
 {
@@ -42,15 +50,50 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
         "4. 出力は日本語の簡潔な箇条書きにすること。前置きや感想は書かないこと。\n" +
         "5. 該当する内容が無い場合は「なし」とだけ出力すること。";
 
-    /// <summary>Characters of transcript per map-phase block.</summary>
-    private const int BlockCharacters = 1500;
+    /// <summary>
+    /// Tokens reserved for the whole six-section document.
+    /// </summary>
+    /// <remarks>
+    /// 1000 tokens is roughly a thousand Japanese characters, which is a full
+    /// page of minutes - more than a ten minute meeting needs and enough that
+    /// a two hour one is not cut off mid-section. It is a ceiling, not a target:
+    /// the model stops when it has finished, and a short meeting decodes a short
+    /// document.
+    /// </remarks>
+    private const int StructuredOutputTokens = 1000;
+
+    /// <summary>Tokens reserved for one map-phase block summary.</summary>
+    private const int BlockSummaryTokens = 320;
 
     /// <summary>
-    /// Upper bound on blocks. 60 blocks is ~90 000 characters, far more than a
-    /// two hour meeting produces; the cap exists so a pathological input cannot
-    /// turn into an hour of CPU inference.
+    /// Tokens allowed for the instructions wrapped around the transcript.
+    /// </summary>
+    /// <remarks>
+    /// Measured, not guessed: the constructor tokenizes the system message and
+    /// the longest prompt template with the model's own vocabulary. This is only
+    /// the value used before the model is loaded, and it is deliberately
+    /// generous.
+    /// </remarks>
+    private const int AssumedPromptTokens = 400;
+
+    /// <summary>
+    /// Upper bound on blocks. 60 blocks is far more than a two hour meeting
+    /// produces once blocks are sized to the context window; the cap exists so a
+    /// pathological input cannot turn into an hour of CPU inference.
     /// </summary>
     private const int MaxBlocks = 60;
+
+    /// <summary>
+    /// How many times the map summaries may be condensed before the reduce.
+    /// </summary>
+    /// <remarks>
+    /// Each round divides the digest by roughly the number of summaries that fit
+    /// in one prompt, so two rounds cover a digest orders of magnitude larger
+    /// than the window - far past anything <see cref="MaxBlocks"/> can produce.
+    /// The cap is here because an inference count that depends on how verbose a
+    /// model happens to be is not a budget.
+    /// </remarks>
+    private const int MaxFoldRounds = 3;
 
     private readonly string _modelPath;
     private readonly int _threads;
@@ -58,6 +101,7 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
     private readonly ILogger _logger;
     private readonly ExtractiveMinutesGenerator _fallback = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly MinutesResponseParser _parser = new();
 
     private LLamaWeights? _weights;
     private bool _disposed;
@@ -76,6 +120,9 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
     public string Name => $"ローカルLLM（{ModelDisplayName}・実験的機能）";
 
     public bool IsAvailable => File.Exists(_modelPath);
+
+    /// <summary>Where the last run spent its time, or null before the first run.</summary>
+    public MinutesMetrics? Metrics { get; private set; }
 
     public async Task<MinutesDocument> GenerateAsync(
         MinutesRequest request,
@@ -118,81 +165,383 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
         IProgress<MinutesProgress>? progress,
         CancellationToken cancellationToken)
     {
+        var metrics = new MinutesMetrics { ContextTokens = (int)_contextSize };
+        var wallClock = Stopwatch.StartNew();
         var warnings = new List<string>();
-        var blocks = BuildBlocks(request.Segments, out var truncated);
-        if (truncated)
-        {
-            warnings.Add($"文字起こしが長いため、先頭 {MaxBlocks} ブロック分のみを議事録生成の対象としました。");
-        }
 
-        if (blocks.Count == 0)
+        var lines = RenderTranscriptLines(request.Segments);
+        if (lines.Count == 0)
         {
             return await FallbackAsync(request, progress, "文字起こしが空のため、抽出型で生成しました。", cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        var totalSteps = blocks.Count + 4;
-        var step = 0;
-
-        progress?.Report(new MinutesProgress("モデルを読み込み中", step, totalSteps));
+        // Loading the weights is what makes a real tokenizer available, so the
+        // plan cannot be made before it. It is also the single largest fixed
+        // cost of the whole feature, which is why it is timed separately.
+        progress?.Report(new MinutesProgress("モデルを読み込み中", 0, 1));
+        var load = Stopwatch.StartNew();
         var executor = CreateExecutor();
+        load.Stop();
+        metrics.ModelLoad = load.Elapsed;
 
-        var summaries = new List<string>();
-        foreach (var block in blocks)
+        var counter = CreateTokenCounter();
+        var promptTokens = MeasurePromptOverhead(counter);
+
+        var plan = MinutesPlanner.Plan(
+            lines,
+            counter,
+            promptTokens,
+            StructuredOutputTokens,
+            (int)_contextSize,
+            MaxBlocks);
+
+        metrics.TranscriptTokens = counter.Count(string.Concat(lines));
+        metrics.SinglePass = plan.SinglePass;
+        metrics.Blocks = plan.Blocks.Count;
+        metrics.Strategy = plan.Reason;
+
+        if (plan.Blocks.Count == 0)
+        {
+            return await FallbackAsync(request, progress, "文字起こしが空のため、抽出型で生成しました。", cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var template = new MinutesTemplate();
+        MinutesResponseParser.Result parsed;
+
+        if (plan.SinglePass)
+        {
+            parsed = await SinglePassAsync(executor, plan.Blocks[0], counter, metrics, progress, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            warnings.Add(
+                $"文字起こしがモデルのコンテキスト長（{_contextSize} トークン）に収まらないため、"
+                + $"{plan.Blocks.Count} ブロックに分割して要約しました。");
+
+            var summaries = await MapAsync(executor, plan.Blocks, counter, metrics, progress, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (summaries.Count == 0)
+            {
+                return await FallbackAsync(request, progress, "ローカルLLMが要点を抽出できなかったため、抽出型で生成しました。", cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (plan.Blocks.Count >= MaxBlocks)
+            {
+                warnings.Add($"文字起こしが長いため、先頭 {MaxBlocks} ブロック分のみを議事録生成の対象としました。");
+            }
+
+            AddMapTopics(template, plan.Blocks, summaries);
+
+            // The summaries are what the reduce reads, and there can be a lot of
+            // them. Fold them down until they fit before asking for a document.
+            var digest = await FoldAsync(
+                executor, summaries, counter, promptTokens, metrics, warnings, progress, cancellationToken)
+                .ConfigureAwait(false);
+
+            parsed = await ReduceAsync(executor, digest, counter, metrics, progress, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (parsed.FellBackToRawText)
+        {
+            warnings.Add(
+                "モデルの出力が想定した見出し形式ではなかったため、生成された文章をそのまま「概要」に記載しています。"
+                + "内容は transcript.md の原文で確認してください。");
+        }
+
+        Fill(template, parsed);
+
+        template.Notes.Add($"この議事録は完全にローカルで動作する小型言語モデル（{ModelDisplayName}）で生成した実験的な結果です。");
+        template.Notes.Add("生成AIの出力には誤りが含まれることがあります。必ず transcript.md の原文で内容を確認してください。");
+        template.Notes.AddRange(warnings);
+
+        wallClock.Stop();
+        metrics.Total = wallClock.Elapsed;
+        Metrics = metrics;
+        _logger.Info(nameof(LocalLlmMinutesGenerator), Environment.NewLine + metrics.ToLogBlock());
+
+        progress?.Report(new MinutesProgress("完了", 1, 1));
+
+        return new MinutesDocument(
+            template.ToMarkdown(request.Metadata, Name),
+            template.ToPlainText(request.Metadata, Name),
+            Name,
+            UsedLocalLlm: true,
+            warnings);
+    }
+
+    /// <summary>The whole transcript, all six sections, one decode.</summary>
+    private async Task<MinutesResponseParser.Result> SinglePassAsync(
+        StatelessExecutor executor,
+        string transcript,
+        ITokenCounter counter,
+        MinutesMetrics metrics,
+        IProgress<MinutesProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        progress?.Report(new MinutesProgress("議事録を作成中", 0, 1));
+
+        var prompt = BuildStructuredPrompt(
+            "次は会議の文字起こし全文です。この内容だけを使って議事録を作成してください。",
+            transcript);
+
+        var clock = Stopwatch.StartNew();
+        var response = await InferAsync(executor, prompt, StructuredOutputTokens, cancellationToken).ConfigureAwait(false);
+        clock.Stop();
+
+        metrics.ReduceInferences = 1;
+        metrics.ReduceTime = clock.Elapsed;
+        metrics.PromptTokens += counter.Count(prompt);
+        metrics.OutputTokens += counter.Count(response);
+
+        return _parser.Parse(response);
+    }
+
+    /// <summary>One compact digest per block. The phase that scales with meeting length.</summary>
+    private async Task<List<string>> MapAsync(
+        StatelessExecutor executor,
+        IReadOnlyList<string> blocks,
+        ITokenCounter counter,
+        MinutesMetrics metrics,
+        IProgress<MinutesProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var summaries = new List<string>(blocks.Count);
+        var clock = new Stopwatch();
+
+        for (var i = 0; i < blocks.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            progress?.Report(new MinutesProgress($"本文を要約中 ({step + 1}/{blocks.Count})", step, totalSteps));
+            progress?.Report(new MinutesProgress($"本文を要約中 ({i + 1}/{blocks.Count})", i, blocks.Count + 1));
 
-            var summary = await InferAsync(
-                    executor,
-                    "次の会議文字起こしの一部から、事実として述べられている要点だけを日本語の箇条書きで抽出してください。\n" +
-                    "推測は禁止です。要点が無ければ「なし」と出力してください。\n\n---\n" + block + "\n---",
-                    maxTokens: 320,
-                    cancellationToken)
-                .ConfigureAwait(false);
+            var prompt =
+                "次の会議文字起こしの一部から、事実として述べられている要点だけを日本語の箇条書きで抽出してください。\n" +
+                "推測は禁止です。要点が無ければ「なし」と出力してください。\n\n---\n" + blocks[i] + "\n---";
+
+            clock.Restart();
+            var summary = await InferAsync(executor, prompt, BlockSummaryTokens, cancellationToken).ConfigureAwait(false);
+            clock.Stop();
+
+            metrics.MapInferences++;
+            metrics.MapTime += clock.Elapsed;
+            metrics.PromptTokens += counter.Count(prompt);
+            metrics.OutputTokens += counter.Count(summary);
 
             if (!string.IsNullOrWhiteSpace(summary) && !summary.Trim().Equals("なし", StringComparison.Ordinal))
             {
                 summaries.Add(summary.Trim());
             }
-
-            step++;
         }
 
-        var digest = string.Join("\n", summaries);
-        if (digest.Length == 0)
+        return summaries;
+    }
+
+    /// <summary>
+    /// Condenses the map summaries until they fit in one reduce prompt.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The map phase produces one summary per block, and a long meeting has a
+    /// lot of blocks: at the cap that is sixty summaries of up to
+    /// <see cref="BlockSummaryTokens"/> tokens each, which is several times a
+    /// 4096-token context window. Concatenating them and calling that the reduce
+    /// prompt would hand llama.cpp more than it can hold, and its answer to that
+    /// is to drop the beginning - the model would summarise the end of the
+    /// meeting and never say so.
+    /// </para>
+    /// <para>
+    /// So the summaries are folded: while they do not fit, they are grouped into
+    /// batches that do, each batch is condensed by one more inference, and the
+    /// result is re-measured. It is the same map step applied to its own output,
+    /// which is what "reduce" means when the digest is itself too big, and it
+    /// terminates because each round is strictly smaller than the last.
+    /// </para>
+    /// <para>
+    /// Rounds are capped all the same, because an inference budget that depends
+    /// on a model's verbosity is not a budget. If the cap is reached the digest
+    /// is cut to what fits and the document says so, rather than letting the
+    /// context window silently decide which half of the meeting counts.
+    /// </para>
+    /// </remarks>
+    private async Task<string> FoldAsync(
+        StatelessExecutor executor,
+        IReadOnlyList<string> summaries,
+        ITokenCounter counter,
+        int promptTokens,
+        MinutesMetrics metrics,
+        List<string> warnings,
+        IProgress<MinutesProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        var current = summaries.ToList();
+
+        for (var round = 0; round < MaxFoldRounds; round++)
         {
-            return await FallbackAsync(request, progress, "ローカルLLMが要点を抽出できなかったため、抽出型で生成しました。", cancellationToken)
-                .ConfigureAwait(false);
+            var digest = string.Join("\n", current);
+            if (MinutesPlanner.FitsInOnePass(
+                    counter.Count(digest), promptTokens, StructuredOutputTokens, (int)_contextSize))
+            {
+                return digest;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            progress?.Report(new MinutesProgress($"要点をさらにまとめ中 ({round + 1})", metrics.MapInferences, metrics.MapInferences + 2));
+
+            var batches = MinutesPlanner.Plan(
+                current.Select(line => line + "\n").ToList(),
+                counter,
+                promptTokens,
+                BlockSummaryTokens,
+                (int)_contextSize,
+                MaxBlocks);
+
+            // One batch that still does not fit means the plan cannot shrink it
+            // any further - a single summary longer than the window. Stop rather
+            // than spin.
+            if (batches.Blocks.Count <= 1)
+            {
+                break;
+            }
+
+            var folded = new List<string>(batches.Blocks.Count);
+            foreach (var batch in batches.Blocks)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var prompt =
+                    "次は会議の要点メモの一部です。重複を除いて要点だけを日本語の箇条書きにまとめ直してください。\n" +
+                    "書かれていない内容を足してはいけません。要点が無ければ「なし」と出力してください。\n\n---\n" + batch + "\n---";
+
+                var clock = Stopwatch.StartNew();
+                var condensed = await InferAsync(executor, prompt, BlockSummaryTokens, cancellationToken).ConfigureAwait(false);
+                clock.Stop();
+
+                metrics.MapInferences++;
+                metrics.MapTime += clock.Elapsed;
+                metrics.PromptTokens += counter.Count(prompt);
+                metrics.OutputTokens += counter.Count(condensed);
+
+                if (!string.IsNullOrWhiteSpace(condensed) && !condensed.Trim().Equals("なし", StringComparison.Ordinal))
+                {
+                    folded.Add(condensed.Trim());
+                }
+            }
+
+            if (folded.Count == 0 || folded.Count >= current.Count)
+            {
+                break;
+            }
+
+            current = folded;
         }
 
-        var template = new MinutesTemplate();
+        // Either the fold ran out of rounds or it stopped shrinking. Take what
+        // fits and say so - a shorter document is recoverable, a document that
+        // silently covers only part of the meeting is not.
+        var final = TakeWhatFits(current, counter, promptTokens);
+        if (final.Count < current.Count)
+        {
+            warnings.Add(
+                $"要点メモがモデルのコンテキスト長に収まらないため、{current.Count} 件中 {final.Count} 件から議事録を作成しました。"
+                + "会議の後半が反映されていない可能性があります。transcript.md の原文で確認してください。");
+        }
 
-        progress?.Report(new MinutesProgress("概要を作成中", step++, totalSteps));
-        template.Overview = (await InferAsync(
-                executor,
-                "次は会議の要点メモです。会議全体の概要を日本語で3文以内にまとめてください。推測は禁止です。\n\n---\n" + digest + "\n---",
-                maxTokens: 220,
-                cancellationToken)
-            .ConfigureAwait(false)).Trim();
+        return string.Join("\n", final);
+    }
 
-        progress?.Report(new MinutesProgress("決定事項を抽出中", step++, totalSteps));
-        AddLines(template.Decisions, await InferAsync(
-            executor,
-            "次の要点メモから、会議で決定された事項だけを箇条書き（「- 」始まり）で列挙してください。" +
-            "決定されていない検討中の内容は含めないでください。該当が無ければ「なし」と出力してください。\n\n---\n" + digest + "\n---",
-            maxTokens: 300,
-            cancellationToken).ConfigureAwait(false));
+    /// <summary>As many summaries as fit in one reduce prompt, from the start.</summary>
+    private List<string> TakeWhatFits(IReadOnlyList<string> summaries, ITokenCounter counter, int promptTokens)
+    {
+        var kept = new List<string>();
+        var tokens = 0;
+        var budget = MinutesPlanner.Budget((int)_contextSize) - promptTokens - StructuredOutputTokens;
 
-        progress?.Report(new MinutesProgress("ToDoを抽出中", step++, totalSteps));
-        var todoText = await InferAsync(
-            executor,
-            "次の要点メモから、今後実施すべきタスク（ToDo・ネクストアクション）を箇条書き（「- 」始まり）で列挙してください。" +
-            "担当者や期限が明記されていない場合は書かないでください。該当が無ければ「なし」と出力してください。\n\n---\n" + digest + "\n---",
-            maxTokens: 300,
-            cancellationToken).ConfigureAwait(false);
+        foreach (var summary in summaries)
+        {
+            var cost = counter.Count(summary) + 1;
+            if (kept.Count > 0 && tokens + cost > budget)
+            {
+                break;
+            }
 
-        foreach (var line in SplitLines(todoText))
+            kept.Add(summary);
+            tokens += cost;
+        }
+
+        return kept;
+    }
+
+    /// <summary>
+    /// The four section prompts, collapsed into one.
+    /// </summary>
+    /// <remarks>
+    /// Asking four times over the same digest was four prefills and four
+    /// decodes of a few hundred tokens each. Asking once, for a marked-up
+    /// document, is one prefill and roughly the same total decoding - and the
+    /// model can see all six sections at once, so something it lists as a
+    /// decision is less likely to appear again under open questions.
+    /// </remarks>
+    private async Task<MinutesResponseParser.Result> ReduceAsync(
+        StatelessExecutor executor,
+        string digest,
+        ITokenCounter counter,
+        MinutesMetrics metrics,
+        IProgress<MinutesProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        progress?.Report(new MinutesProgress("議事録をまとめ中", metrics.MapInferences, metrics.MapInferences + 1));
+
+        var prompt = BuildStructuredPrompt(
+            "次は会議の要点メモです。このメモに書かれている内容だけを使って議事録を作成してください。",
+            digest);
+
+        var clock = Stopwatch.StartNew();
+        var response = await InferAsync(executor, prompt, StructuredOutputTokens, cancellationToken).ConfigureAwait(false);
+        clock.Stop();
+
+        metrics.ReduceInferences = 1;
+        metrics.ReduceTime = clock.Elapsed;
+        metrics.PromptTokens += counter.Count(prompt);
+        metrics.OutputTokens += counter.Count(response);
+
+        return _parser.Parse(response);
+    }
+
+    private static string BuildStructuredPrompt(string instruction, string body)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(instruction);
+        sb.AppendLine();
+        sb.Append(MinutesResponseParser.FormatInstructions());
+        sb.AppendLine();
+        sb.AppendLine("---");
+        sb.AppendLine(body);
+        sb.Append("---");
+        return sb.ToString();
+    }
+
+    /// <summary>Moves the parsed sections onto the template.</summary>
+    /// <remarks>
+    /// Actions get <see cref="MinutesTemplate.Unknown"/> for owner and due date
+    /// unconditionally, exactly as before. The model is told not to invent them
+    /// and is not asked to supply them here either, because a field that is
+    /// sometimes parsed out of free text is a field that is sometimes wrong -
+    /// and a wrong owner on a task in a meeting record is worse than an honest
+    /// 要確認.
+    /// </remarks>
+    private static void Fill(MinutesTemplate template, MinutesResponseParser.Result parsed)
+    {
+        template.Overview = parsed.Text(MinutesSection.Overview).Trim();
+
+        template.Decisions.AddRange(Meaningful(parsed.Lines(MinutesSection.Decisions)));
+        template.OpenQuestions.AddRange(Meaningful(parsed.Lines(MinutesSection.OpenQuestions)));
+
+        foreach (var line in Meaningful(parsed.Lines(MinutesSection.Actions)))
         {
             template.Actions.Add(new MinutesTemplate.ActionItem
             {
@@ -202,48 +551,123 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
             });
         }
 
-        progress?.Report(new MinutesProgress("継続検討事項を抽出中", step++, totalSteps));
-        AddLines(template.OpenQuestions, await InferAsync(
-            executor,
-            "次の要点メモから、結論が出ずに継続検討となった事項を箇条書き（「- 」始まり）で列挙してください。" +
-            "該当が無ければ「なし」と出力してください。\n\n---\n" + digest + "\n---",
-            maxTokens: 300,
-            cancellationToken).ConfigureAwait(false));
+        // Topics only when the map phase did not already fill them. On the
+        // map-reduce path the per-block summaries are the better source: they
+        // are time ordered, they carry the timestamps of the audio they came
+        // from, and the digest the reduce was given is made of exactly the same
+        // material - so what is skipped here is a restatement, not content.
+        var topicPoints = Meaningful(parsed.Lines(MinutesSection.Topics)).ToList();
+        if (topicPoints.Count > 0 && template.Topics.Count == 0)
+        {
+            var topic = new MinutesTemplate.TopicSection { Title = "議題別内容" };
+            topic.Points.AddRange(topicPoints);
+            template.Topics.Add(topic);
+        }
 
-        // Topics are assembled deterministically from the map phase rather than
-        // asked for again: the block boundaries are already time ordered, so
-        // this keeps the section factual and cheap.
+        template.Notes.AddRange(Meaningful(parsed.Lines(MinutesSection.Notes)));
+    }
+
+    /// <summary>
+    /// Topics from the map phase: the block boundaries are already in time
+    /// order, so this stays factual and costs no inference.
+    /// </summary>
+    /// <remarks>
+    /// The time range comes back out of the block's own text. Every transcript
+    /// line was rendered with its timestamp in front of it, so the first and
+    /// last of them are the range - read from the material rather than tracked
+    /// alongside it, which is one fewer thing that can fall out of step.
+    /// </remarks>
+    private static void AddMapTopics(
+        MinutesTemplate template,
+        IReadOnlyList<string> blocks,
+        IReadOnlyList<string> summaries)
+    {
         for (var i = 0; i < summaries.Count; i++)
         {
             var topic = new MinutesTemplate.TopicSection
             {
                 Title = $"要点 {i + 1}",
-                TimeRange = blocks[i].TimeRange,
+                TimeRange = i < blocks.Count ? TimeRangeOf(blocks[i]) : string.Empty,
             };
 
-            foreach (var line in SplitLines(summaries[i]))
-            {
-                topic.Points.Add(line);
-            }
+            topic.Points.AddRange(Meaningful(summaries[i].Split('\n')));
 
             if (topic.Points.Count > 0)
             {
                 template.Topics.Add(topic);
             }
         }
+    }
 
-        template.Notes.Add($"この議事録は完全にローカルで動作する小型言語モデル（{ModelDisplayName}）で生成した実験的な結果です。");
-        template.Notes.Add("生成AIの出力には誤りが含まれることがあります。必ず transcript.md の原文で内容を確認してください。");
-        template.Notes.AddRange(warnings);
+    /// <summary>"first 〜 last" from the timestamps a block's lines carry, or empty.</summary>
+    private static string TimeRangeOf(string block)
+    {
+        var matches = System.Text.RegularExpressions.Regex.Matches(block, @"\[(\d+:\d{2}:\d{2})\]");
+        if (matches.Count == 0)
+        {
+            return string.Empty;
+        }
 
-        progress?.Report(new MinutesProgress("完了", totalSteps, totalSteps));
+        var first = matches[0].Groups[1].Value;
+        var last = matches[^1].Groups[1].Value;
+        return first == last ? first : $"{first} 〜 {last}";
+    }
 
-        return new MinutesDocument(
-            template.ToMarkdown(request.Metadata, Name),
-            template.ToPlainText(request.Metadata, Name),
-            Name,
-            UsedLocalLlm: true,
-            warnings);
+    private static IEnumerable<string> Meaningful(IEnumerable<string> lines)
+    {
+        foreach (var raw in lines)
+        {
+            var line = raw.Trim().TrimStart('-', '*', '・', '　', ' ').Trim();
+            if (line.Length < 2 || line == "なし" || line.StartsWith("```", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            yield return line;
+        }
+    }
+
+    /// <summary>
+    /// One line per segment, timestamped and attributed, ready to be split
+    /// between blocks without ever cutting a sentence.
+    /// </summary>
+    private static List<string> RenderTranscriptLines(IReadOnlyList<TranscriptSegment> segments)
+    {
+        var lines = new List<string>();
+
+        foreach (var segment in segments.OrderBy(s => s.StartMs))
+        {
+            if (string.IsNullOrWhiteSpace(segment.Text))
+            {
+                continue;
+            }
+
+            lines.Add(
+                $"[{segment.TimestampLabel()}] {segment.SourceLabel()}: {segment.Text.Trim()}"
+                + Environment.NewLine);
+        }
+
+        return lines;
+    }
+
+    private ITokenCounter CreateTokenCounter()
+        => _weights is null ? new HeuristicTokenCounter() : new LlamaTokenCounter(_weights);
+
+    /// <summary>
+    /// Measures the instructions that wrap every prompt, rather than assuming
+    /// them.
+    /// </summary>
+    private int MeasurePromptOverhead(ITokenCounter counter)
+    {
+        var skeleton = SystemPrompt + BuildStructuredPrompt(
+            "次は会議の文字起こし全文です。この内容だけを使って議事録を作成してください。",
+            string.Empty);
+
+        var measured = counter.Count(skeleton);
+
+        // The chat template llama.cpp applies adds role markers this code never
+        // sees. A flat allowance on top is cheaper than being wrong about them.
+        return Math.Max(AssumedPromptTokens, measured + 128);
     }
 
     private static readonly object NativeConfigSync = new();
@@ -327,7 +751,7 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
         var parameters = new InferenceParams
         {
             MaxTokens = maxTokens,
-            AntiPrompts = new[] { "---", "<|im_end|>", "<|endoftext|>" },
+            AntiPrompts = new[] { "<|im_end|>", "<|endoftext|>" },
             SamplingPipeline = new DefaultSamplingPipeline
             {
                 // Low temperature: the job is extraction, not creative writing.
@@ -345,77 +769,6 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
         }
 
         return builder.ToString();
-    }
-
-    private static void AddLines(List<string> destination, string text)
-    {
-        foreach (var line in SplitLines(text))
-        {
-            destination.Add(line);
-        }
-    }
-
-    private static IEnumerable<string> SplitLines(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            yield break;
-        }
-
-        foreach (var raw in text.Split('\n'))
-        {
-            var line = raw.Trim().TrimStart('-', '*', '・', '　', ' ').Trim();
-            if (line.Length < 2 || line == "なし" || line.StartsWith("```", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            yield return line;
-        }
-    }
-
-    private List<TranscriptBlock> BuildBlocks(IReadOnlyList<TranscriptSegment> segments, out bool truncated)
-    {
-        var blocks = new List<TranscriptBlock>();
-        var builder = new StringBuilder();
-        long blockStart = -1;
-        long blockEnd = 0;
-
-        foreach (var segment in segments.OrderBy(s => s.StartMs))
-        {
-            if (string.IsNullOrWhiteSpace(segment.Text))
-            {
-                continue;
-            }
-
-            if (blockStart < 0)
-            {
-                blockStart = segment.StartMs;
-            }
-
-            blockEnd = segment.EndMs;
-            builder.Append('[').Append(segment.TimestampLabel()).Append("] ")
-                   .Append(segment.SourceLabel()).Append(": ")
-                   .AppendLine(segment.Text.Trim());
-
-            if (builder.Length >= BlockCharacters)
-            {
-                blocks.Add(new TranscriptBlock(builder.ToString(), Range(blockStart, blockEnd)));
-                builder.Clear();
-                blockStart = -1;
-            }
-        }
-
-        if (builder.Length > 0 && blockStart >= 0)
-        {
-            blocks.Add(new TranscriptBlock(builder.ToString(), Range(blockStart, blockEnd)));
-        }
-
-        truncated = blocks.Count > MaxBlocks;
-        return truncated ? blocks.Take(MaxBlocks).ToList() : blocks;
-
-        static string Range(long start, long end)
-            => $"{TranscriptSegment.FormatTimestamp(start)} 〜 {TranscriptSegment.FormatTimestamp(end)}";
     }
 
     private async Task<MinutesDocument> FallbackAsync(
@@ -450,8 +803,37 @@ public sealed class LocalLlmMinutesGenerator : IMinutesGenerator
         _gate.Dispose();
     }
 
-    private sealed record TranscriptBlock(string Text, string TimeRange)
+    /// <summary>
+    /// The loaded model's own tokenizer. The only counter whose answer is a
+    /// fact rather than an estimate.
+    /// </summary>
+    private sealed class LlamaTokenCounter : ITokenCounter
     {
-        public static implicit operator string(TranscriptBlock block) => block.Text;
+        private readonly LLamaWeights _weights;
+
+        public LlamaTokenCounter(LLamaWeights weights)
+        {
+            _weights = weights;
+        }
+
+        public int Count(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return 0;
+            }
+
+            try
+            {
+                return _weights.Tokenize(text, false, false, Encoding.UTF8).Length;
+            }
+            catch (Exception)
+            {
+                // A tokenizer that throws is not a reason to abandon a meeting's
+                // minutes. Over-estimating sends the planner down the map-reduce
+                // path, which always works.
+                return text.Length;
+            }
+        }
     }
 }

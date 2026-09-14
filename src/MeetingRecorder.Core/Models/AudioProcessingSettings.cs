@@ -45,22 +45,118 @@ public sealed class AudioProcessingSettings
     /// <summary>-3 dB point of the DC blocker, in Hz.</summary>
     public double DcBlockerCutoffHz { get; set; } = 20.0;
 
+    // ---- Listening EQ (meeting file, microphone leg only) ----------------
+
+    /// <summary>
+    /// Applies one fixed high shelf to the microphone leg of the meeting mix,
+    /// for a microphone that has the bandwidth but sounds duller than the
+    /// PC-audio leg beside it in the same file.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Off by default, and it should stay off until there is a reason. After
+    /// every recording <see cref="Audio.SpectralBalance"/> measures both
+    /// working-audio files and writes the comparison to the log; if the
+    /// microphone's 4-7 kHz band really does sit well below the PC audio's, that
+    /// measurement is the reason. Turning it on because a recording "sounds a
+    /// bit flat" is not.
+    /// </para>
+    /// <para>
+    /// It cannot help a device that never delivered the band. A 16 kHz endpoint
+    /// has nothing above 8 kHz to lift, and the capture-format block in the log
+    /// says so explicitly rather than letting an equalizer imply otherwise.
+    /// </para>
+    /// <para>
+    /// It never touches the 16 kHz working audio, and never touches the PC-audio
+    /// leg. See <see cref="Dsp.ListeningEq"/>.
+    /// </para>
+    /// </remarks>
+    public bool MicrophoneListeningEqEnabled { get; set; }
+
+    /// <summary>
+    /// Corner frequency of the microphone listening shelf, in Hz.
+    /// </summary>
+    /// <remarks>
+    /// 2.5 kHz. Consonant place-of-articulation cues start around 2 kHz and
+    /// sibilant energy runs to 8 kHz, so a shelf hinged here lifts the whole
+    /// region intelligibility is carried in while leaving the vowel formants -
+    /// and therefore the speaker's voice - where they were. A corner up at
+    /// 6 kHz would only add air; one down at 1 kHz would rebalance the voice
+    /// itself.
+    /// </remarks>
+    public double MicrophoneListeningEqCornerHz { get; set; } = 2500.0;
+
+    /// <summary>
+    /// Tilt of the microphone listening shelf, in dB.
+    /// </summary>
+    /// <remarks>
+    /// 4 dB, and deliberately at the small end. It is about the smallest tilt
+    /// that is clearly audible on speech, and the measurement it answers is a
+    /// difference of 6 dB or more, so it closes most of a real gap without
+    /// overshooting a marginal one. Anything larger starts to sound thin, and
+    /// nothing here is trying to make a meeting sound produced.
+    /// </remarks>
+    public double MicrophoneListeningEqGainDb { get; set; } = 4.0;
+
     // ---- Mixer -----------------------------------------------------------
 
     /// <summary>
     /// Constant gain applied to each leg before the two are summed into the
-    /// saved file. -6.02 dB (a factor of exactly 0.5) is the value that makes
-    /// clipping arithmetically impossible: two streams that are each already
-    /// full scale sum to exactly full scale.
+    /// saved file. -8.18 dB (a factor of 0.39) is the value that keeps the sum
+    /// inside full scale for every bounded input.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// This is the only reason the mixer needs any gain at all. It is one
     /// constant, identical for both legs and for the whole recording, so it
-    /// scales the mix without changing the shape of anything in it. The 6 dB it
+    /// scales the mix without changing the shape of anything in it. What it
     /// costs is given back once, by the peak normalizer, after the recording is
     /// closed and its true peak is known.
+    /// </para>
+    /// <para><b>Why 0.4 and not 0.5.</b> It was 0.5, on the reasoning that two
+    /// full-scale legs then sum to exactly full scale. That reasoning assumed
+    /// nothing ahead of the mixer could hand it a sample above full scale, which
+    /// was true while the resampler interpolated linearly - a weighted average of
+    /// two samples cannot leave their range. It stopped being true when the
+    /// interpolation became cubic:
+    /// <see cref="Dsp.Resampler.MaximumInterpolationGain"/> is 1.25, reachable by
+    /// an ordinary loud signal turning around near Nyquist. Two such legs at 0.5
+    /// would sum to 1.25 and be flattened by the writer's backstop clamp - a
+    /// clipped meeting, produced by the stage whose entire job is to make
+    /// clipping impossible.
+    /// </para>
+    /// <para>
+    /// So the constant is derived from that bound rather than from an assumption
+    /// about it. The arithmetic requirement is <c>1 / (2 x 1.25) = 0.4</c>, and
+    /// the value used is a little under it, because the interpolator is not the
+    /// last stage before the mixer: the DC blocker is, and a first-order
+    /// high-pass has a gain of <c>2 / (1 + R)</c> at Nyquist, which at the 20 Hz
+    /// corner is 1.0013. Two legs at exactly 0.4 would therefore reach 1.0013 and
+    /// be clamped - by a thirteen-hundredth of a decibel, which is still a
+    /// clipped meeting. 0.39 leaves the worst case at 0.976.
+    /// </para>
+    /// <para>
+    /// <c>ResamplerHeadroomTests</c> measures the interpolator's bound and
+    /// asserts this constant is inside it, so changing the interpolator without
+    /// revisiting the head-room fails there rather than clipping a recording.
+    /// </para>
+    /// <para>
+    /// The extra 2.16 dB is not lost. It is head-room during the recording only,
+    /// and the peak normalizer measures the finished file and gives it straight
+    /// back - so the delivered file is exactly as loud as it was before, and the
+    /// only price is 2.16 dB more room above the 16-bit quantizer while the pump
+    /// is writing, which is far below any microphone's own noise floor.
+    /// </para>
+    /// <para>
+    /// One honest limit. This covers the stages' gain at and below Nyquist, not
+    /// the DC blocker's true worst case over every bounded input, which is 2.0
+    /// and is reached only by a full-scale step between the rails - a signal no
+    /// acoustic source produces, and a property this filter had before any of
+    /// this changed. The writer's clamp remains the backstop for that, as it
+    /// always was.
+    /// </para>
     /// </remarks>
-    public double MixGainPerStreamDb { get; set; } = -6.0206;
+    public double MixGainPerStreamDb { get; set; } = -8.1787;
 
     // ---- Peak normalization (applied once, after recording) --------------
 
